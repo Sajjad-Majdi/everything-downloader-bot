@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 from . import texts as T
@@ -17,10 +18,13 @@ from .config import LINK_TTL, SAFE_UPLOAD_LIMIT, Config
 from .formats import (Option, build_options, direct_url, entries_of, entry_is_resolved, plan)
 from .signing import sign
 from .tg import Telegram, TgError, keyboard
+from .thumbs import make_thumb
 
 log = logging.getLogger("bot")
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 EDIT_EVERY = 3.0
+INFO_FRESH = 20 * 60      # reuse extracted media URLs for this long, then extract again
+KEEP_INFOS = 6            # info dicts are large; keep only the newest few in RAM
 
 
 @dataclass
@@ -32,6 +36,8 @@ class Pending:
     index: int | None = None          # 1-based item inside a carousel
     entries: list[dict] = field(default_factory=list)  # playlist / carousel menu
     carousel: bool = False
+    info: dict | None = None          # extract() result, reused for the download (no second extraction)
+    t: float = field(default_factory=time.monotonic)
 
 
 def find_url(msg: dict) -> str | None:
@@ -55,6 +61,18 @@ def option_rows(rid: str, options: list[Option]) -> list[list[tuple[str, str]]]:
     return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
 
 
+def dl_timings(progress: dict) -> dict:
+    """prep = yt-dlp work before the first byte, transfer = bytes on the wire, merge = ffmpeg."""
+    s0 = progress.get("t_start")
+    if not s0:
+        return {}
+    fb, de = progress.get("t_first_byte"), progress.get("t_dl_end")
+    pp, ppe = progress.get("t_pp"), progress.get("t_pp_end")
+    return {"prep": round((fb or s0) - s0, 2), "transfer": round(de - fb, 2) if fb and de else 0,
+            "merge": round(ppe - pp, 2) if pp and ppe else 0, "files": progress.get("files"),
+            "bytes": progress.get("done")}
+
+
 class Bot:
     def __init__(self, cfg: Config, tg: Telegram):
         self.cfg = cfg
@@ -65,6 +83,7 @@ class Bot:
         self.extracts = asyncio.Semaphore(2)
         self._ids = itertools.count(1)
         self.tasks: set[asyncio.Task] = set()
+        self._with_info: deque[Pending] = deque()
 
     # entry point -----------------------------------------------------------
     def spawn(self, coro):
@@ -103,9 +122,11 @@ class Bot:
         await self.analyze(chat, status["message_id"], url)
 
     async def analyze(self, chat: int, mid: int, url: str):
+        t0 = time.monotonic()
         try:
             async with self.extracts:
                 info = await asyncio.to_thread(ytdl.extract, url, self.cfg.cookie_file)
+            log.info("timing extract=%.1fs url=%s", time.monotonic() - t0, url)
         except Exception as e:
             log.warning("extract failed for %s: %s", url, e)
             await self.tg.edit(chat, mid, T.error_text(e))
@@ -122,7 +143,8 @@ class Bot:
                 if len(vids) == 1:
                     idx, e = vids[0]
                     return await self.show_menu(chat, mid, Pending(url, e.get("title") or info.get("title") or "",
-                                                                    e.get("duration"), build_options(e), index=idx))
+                                                                    e.get("duration"), build_options(e), index=idx,
+                                                                    info=e))
                 p = Pending(url, info.get("title") or "", entries=[dict(e, _index=i) for i, e in vids], carousel=True)
                 self.pending.put(rid, p)
                 rows = [[(T.ITEM.format(i=T.fa(n + 1)), f"e:{rid}:{n}")] for n in range(len(vids))]
@@ -139,15 +161,24 @@ class Bot:
             await self.tg.edit(chat, mid, T.NO_VIDEO)
             return
         await self.show_menu(chat, mid, Pending(info.get("webpage_url") or url, info.get("title") or "",
-                                                info.get("duration"), options), rid)
+                                                info.get("duration"), options, info=info), rid)
 
     async def show_menu(self, chat, mid, p: Pending, rid: str | None = None):
         rid = rid or self.new_id()
         self.pending.put(rid, p)
+        self.keep_info(p)
         head = p.title[:200]
         dur = T.human_duration(p.duration)
         text = f"{head}\n{('مدت: ' + dur) if dur else ''}\n{T.CHOOSE}".replace("\n\n", "\n")
         await self.tg.edit(chat, mid, text, keyboard(option_rows(rid, p.options)))
+
+    def keep_info(self, p: Pending):
+        if p.info is None:
+            return
+        self._with_info.append(p)
+        while len(self._with_info) > KEEP_INFOS:
+            old = self._with_info.popleft()
+            old.info = None
 
     def new_id(self) -> str:
         n = next(self._ids)
@@ -174,7 +205,7 @@ class Bot:
             e = p.entries[int(parts[2])]
             if p.carousel:
                 await self.show_menu(chat, mid, Pending(p.url, e.get("title") or p.title, e.get("duration"),
-                                                        build_options(e), index=e["_index"]))
+                                                        build_options(e), index=e["_index"], info=e, t=p.t))
             else:
                 await self.tg.edit(chat, mid, T.CHECKING)
                 await self.analyze(chat, mid, e.get("url") or e.get("webpage_url"))
@@ -182,83 +213,137 @@ class Bot:
             await self.tg.edit(chat, mid, T.PREPARING)
             for e in p.entries:
                 opts = build_options(e)
-                sub = Pending(p.url, e.get("title") or p.title, e.get("duration"), opts, index=e["_index"])
+                sub = Pending(p.url, e.get("title") or p.title, e.get("duration"), opts, index=e["_index"], info=e, t=p.t)
                 status = await self.tg.send(chat, T.PREPARING)
                 await self.deliver(chat, status["message_id"], sub, auto_option(opts))
             await self.tg.delete(chat, mid)
 
     # delivery ------------------------------------------------------------------
     async def deliver(self, chat: int, mid: int, p: Pending, opt: Option):
+        try:
+            res = await self.run_job(chat, mid, p, opt)
+        except Exception as e:
+            log.exception("job failed")
+            await self.tg.edit(chat, mid, T.error_text(e))
+            return
+        if res.get("link"):
+            await self.send_link(chat, mid, p, opt, res["link"])
+        else:
+            await self.tg.delete(chat, mid)
+
+    async def run_job(self, chat: int, mid: int | None, p: Pending, opt: Option, reuse: bool = True,
+                      quiet: bool = False) -> dict:
+        """Send one video. Returns timings; {"link": mode} when it must go out as a link instead."""
+        t0 = time.monotonic()
+        tm: dict = {"spec": opt.spec, "size": opt.size}
         key = (p.url, p.index, opt.spec)
         caption = p.title[:900]
+        extra = {"disable_notification": True} if quiet else {}
+
+        async def status(text):
+            if mid is not None:
+                try:
+                    await self.tg.edit(chat, mid, text)
+                except TgError:
+                    pass
+
         fid = self.file_ids.get(key)
-        if fid:
+        if fid and not quiet:
             try:
-                await self.tg.call("sendVideo", chat_id=chat, video=fid, caption=caption, supports_streaming=True)
-                await self.tg.delete(chat, mid)
-                return
+                res = await self.tg.call("sendVideo", chat_id=chat, video=fid, caption=caption,
+                                         supports_streaming=True)
+                tm.update(mode="cached", total=round(time.monotonic() - t0, 2), msg=res.get("message_id"))
+                log.info("timing job %s", tm)
+                return tm
             except TgError:
                 log.info("cached file_id failed, downloading again")
+        info = p.info if (reuse and p.info is not None and time.monotonic() - p.t < INFO_FRESH) else None
+        tm["reuse"] = info is not None
         mode = plan(opt)
-        if mode == "url_send":
-            await self.tg.edit(chat, mid, T.UPLOADING)
-            try:
-                res = await self.tg.call("sendVideo", chat_id=chat, video=direct_url(opt), caption=caption,
-                                         supports_streaming=True)
-                self.remember(key, res)
-                await self.tg.delete(chat, mid)
-                return
-            except TgError as e:
-                log.info("URL send failed (%s), uploading instead", e.desc)
-                mode = "upload"
-        if mode == "upload":
-            try:
-                await self.upload(chat, mid, p, opt, key, caption)
-                return
-            except ytdl.TooBig:
-                mode = "direct_link" if direct_url(opt) else "stream_link"
-            except Exception as e:
-                log.exception("download failed")
-                await self.tg.edit(chat, mid, T.error_text(e))
-                return
-        await self.send_link(chat, mid, p, opt, mode)
+        tm["mode"] = mode
+        if mode in ("direct_link", "stream_link"):
+            return tm | {"link": mode}
+        v = opt.video
+        meta = dict(duration=int(p.duration) if p.duration else None, width=v.get("width"), height=v.get("height"))
+        tmpdir = tempfile.mkdtemp(prefix="dl-")
+        thumb_task = None
+        if p.info:
+            thumb_task = asyncio.create_task(make_thumb(await self.tg.session(), p.info, tmpdir))
+        progress = {"done": 0, "cur": 0, "total": opt.size, "phase": "dl"}
+        ticker = asyncio.create_task(self.tick(chat, mid, progress)) if mid is not None else None
+        try:
+            if mode == "url_send":
+                thumb = await self._thumb(thumb_task, tm)
+                await status(T.UPLOADING)
+                t1 = time.monotonic()
+                try:
+                    res = await self.tg.send_video(chat, direct_url(opt), is_file=False, caption=caption,
+                                                   thumb=thumb, **meta, **extra)
+                    tm["url_send"] = round(time.monotonic() - t1, 2)
+                    return self._done(tm, t0, key, res)
+                except TgError as e:
+                    tm["url_send_failed"] = round(time.monotonic() - t1, 2)
+                    log.info("URL send failed (%s), uploading instead", e.desc)
+            if self.jobs.locked():
+                await status(T.QUEUED)
+            async with self.jobs:
+                tm["queue"] = round(time.monotonic() - t0, 2)
+                try:
+                    path = await asyncio.to_thread(ytdl.download, p.url, opt.spec, tmpdir, progress, p.index,
+                                                   self.cfg.cookie_file, info=info)
+                except ytdl.TooBig:
+                    return tm | {"link": "direct_link" if direct_url(opt) else "stream_link"}
+                finally:
+                    tm.update(dl_timings(progress))
+                thumb = await self._thumb(thumb_task, tm)
+                progress["phase"] = "up"
+                t1 = time.monotonic()
+                res = await self.tg.send_video(chat, path, is_file=True, caption=caption, thumb=thumb,
+                                               progress=progress, **meta, **extra)
+                tm["upload"] = round(time.monotonic() - t1, 2)
+                return self._done(tm, t0, key, res)
+        finally:
+            if ticker:
+                ticker.cancel()
+            if thumb_task and not thumb_task.done():
+                thumb_task.cancel()
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    async def _thumb(self, task, tm):
+        if task is None:
+            return None
+        try:
+            thumb = await asyncio.wait_for(asyncio.shield(task), 6)
+        except Exception:
+            thumb = None
+        tm["thumb"] = bool(thumb)
+        return thumb
+
+    def _done(self, tm: dict, t0: float, key, res: dict) -> dict:
+        self.remember(key, res)
+        tm.update(total=round(time.monotonic() - t0, 2), msg=res.get("message_id"))
+        log.info("timing job %s", {k: v for k, v in tm.items() if k != "msg"})
+        return tm
 
     def remember(self, key, res: dict):
         fid = (res.get("video") or res.get("document") or res.get("animation") or {}).get("file_id")
         if fid:
             self.file_ids.put(key, fid)
 
-    async def upload(self, chat, mid, p: Pending, opt: Option, key, caption):
-        if self.jobs.locked():
-            await self.tg.edit(chat, mid, T.QUEUED)
-        async with self.jobs:
-            tmpdir = tempfile.mkdtemp(prefix="dl-")
-            progress = {"done": 0, "cur": 0, "total": opt.size}
-            ticker = asyncio.create_task(self.tick(chat, mid, progress))
-            try:
-                path = await asyncio.to_thread(ytdl.download, p.url, opt.spec, tmpdir, progress, p.index,
-                                               self.cfg.cookie_file)
-                ticker.cancel()
-                await self.tg.edit(chat, mid, T.UPLOADING)
-                v = opt.video
-                res = await self.tg.send_video_file(
-                    chat, path, caption=caption, duration=int(p.duration) if p.duration else None,
-                    width=v.get("width"), height=v.get("height"))
-                self.remember(key, res)
-                await self.tg.delete(chat, mid)
-            finally:
-                ticker.cancel()
-                shutil.rmtree(tmpdir, ignore_errors=True)
-
     async def tick(self, chat, mid, progress: dict):
         last = ""
         try:
             while True:
                 await asyncio.sleep(EDIT_EVERY)
-                total = progress.get("total")
-                got = progress.get("done", 0) + progress.get("cur", 0)
-                pct = min(99.0, 100.0 * got / total) if total else None
-                text = T.downloading(pct, total)
+                if progress.get("phase") == "up":
+                    total = progress.get("up_total")
+                    pct = min(99.0, 100.0 * progress.get("up", 0) / total) if total else None
+                    text = T.uploading(pct)
+                else:
+                    total = progress.get("total")
+                    got = progress.get("done", 0) + progress.get("cur", 0)
+                    pct = min(99.0, 100.0 * got / total) if total else None
+                    text = T.downloading(pct, total)
                 if text != last:
                     last = text
                     try:
