@@ -497,3 +497,40 @@ async def test_send_video_big_file_bytes_intact(aiohttp_client, tmp_path):
         await tg.close()
     assert got["sha"] == hashlib.sha256(data).hexdigest()
     assert progress["up"] == progress["up_total"] == len(data)
+
+
+async def test_stalled_upload_is_retried_on_new_connection(aiohttp_client, tmp_path, monkeypatch):
+    import asyncio
+    import hashlib
+
+    from aiohttp import web
+
+    from dlbot.tg import Telegram
+
+    data = os.urandom(24 * 1024 * 1024)
+    src = tmp_path / "v.mp4"
+    src.write_bytes(data)
+    seen = {"n": 0}
+
+    async def send_video(request):
+        seen["n"] += 1
+        if seen["n"] == 1:              # first connection: never read the body (a "stuck" link)
+            await asyncio.sleep(30)
+            return web.json_response({"ok": False, "description": "late"})
+        form = await request.post()
+        seen["sha"] = hashlib.sha256(form["video"].file.read()).hexdigest()
+        return web.json_response({"ok": True, "result": {"message_id": 3}})
+
+    srv = web.Application(client_max_size=64 * 1024 * 1024)
+    srv.router.add_post("/bot1:x/sendVideo", send_video)
+    c = await aiohttp_client(srv)
+    monkeypatch.setattr(Telegram, "STALL_AFTER", 1.5)
+    monkeypatch.setattr(Telegram, "WINDOW", 1.0)
+    tg = Telegram("1:x", str(c.make_url("")).rstrip("/"))
+    progress = {}
+    try:
+        res = await tg.send_video(1, str(src), is_file=True, progress=progress)
+    finally:
+        await tg.close()
+    assert res["message_id"] == 3 and progress["attempts"] == 2 and seen["n"] == 2
+    assert seen["sha"] == hashlib.sha256(data).hexdigest()
