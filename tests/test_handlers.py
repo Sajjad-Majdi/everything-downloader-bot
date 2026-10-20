@@ -24,10 +24,23 @@ class FakeTG:
     async def call(self, method, **p):
         self.calls.append((method, p))
         if method == "sendVideo":
-            if self.fail_url_send and str(p.get("video", "")).startswith("http"):
-                raise TgError(method, "failed to get HTTP URL content")
             return {"message_id": 1, "video": {"file_id": "FID-" + str(p["video"])[-6:]}}
         return True
+
+    async def session(self):
+        return None
+
+    async def send_video(self, chat, video, *, is_file, caption="", thumb=None, progress=None, **extra):
+        if not is_file:
+            self.calls.append(("sendVideo", {"video": video, "thumb": thumb, **extra}))
+            if self.fail_url_send:
+                raise TgError("sendVideo", "failed to get HTTP URL content")
+            return {"message_id": 1, "video": {"file_id": "FID-" + video[-6:]}}
+        assert os.path.exists(video)
+        if progress is not None:
+            progress["up"] = progress["up_total"] = os.path.getsize(video)
+        self.uploads.append((video, os.path.getsize(video), thumb, extra))
+        return {"message_id": 2, "video": {"file_id": "UPLOADED"}}
 
     async def send(self, chat, text, reply_markup=None, reply_to=None):
         self.n += 1
@@ -42,11 +55,6 @@ class FakeTG:
 
     async def answer(self, cid, text=None):
         self.calls.append(("answer", {}))
-
-    async def send_video_file(self, chat, path, caption="", **extra):
-        assert os.path.exists(path)
-        self.uploads.append((path, os.path.getsize(path)))
-        return {"video": {"file_id": "UPLOADED"}}
 
     async def close(self):
         pass
@@ -72,11 +80,19 @@ def cb(data, uid=OWNER):
                                "message": {"message_id": 101, "chat": {"id": uid}}}}
 
 
+async def fake_thumb(session, info, tmpdir):
+    path = os.path.join(tmpdir, "thumb.jpg")
+    with open(path, "wb") as fh:
+        fh.write(b"\xff\xd8\xff")
+    return path
+
+
 @pytest.fixture
 def setup(monkeypatch):
     tg = FakeTG()
     b = botmod.Bot(cfg(), tg)
     monkeypatch.setattr(botmod, "EDIT_EVERY", 0.01)
+    monkeypatch.setattr(botmod, "make_thumb", fake_thumb)
     return b, tg
 
 
@@ -106,7 +122,7 @@ async def test_menu_then_upload_then_cache(setup, monkeypatch):
     monkeypatch.setattr(ytdl, "extract", lambda url, c=None: yt_info())
     seen = {}
 
-    def fake_download(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0):
+    def fake_download(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
         seen.update(url=url, spec=spec, tmpdir=tmpdir)
         progress["cur"] = 5 * MB
         p = os.path.join(tmpdir, "video.mp4")
@@ -151,7 +167,7 @@ async def test_unknown_size_too_big_falls_back_to_link(setup, monkeypatch):
     monkeypatch.setattr(ytdl, "extract", lambda url, c=None: info)
     dirs = []
 
-    def too_big(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0):
+    def too_big(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
         dirs.append(tmpdir)
         raise ytdl.TooBig()
 
@@ -177,7 +193,7 @@ async def test_url_send_failure_falls_back_to_upload(monkeypatch):
     b = botmod.Bot(cfg(), tg)
     monkeypatch.setattr(ytdl, "extract", lambda url, c=None: insta_info())
 
-    def dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0):
+    def dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
         p = os.path.join(tmpdir, "video.mp4")
         open(p, "wb").close()
         return p
@@ -361,3 +377,93 @@ async def test_call_with_file_sends_multipart(aiohttp_client, tmp_path):
         await tg.close()
     assert got == {"path": "/bot1:x/setMyProfilePhoto", "photo": {"type": "static", "photo": "attach://pic"},
                    "pic": b"JPEGDATA"}
+
+
+async def test_download_reuses_menu_info_and_sends_thumb(setup, monkeypatch):
+    b, tg = setup
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None: yt_info())
+    seen = {}
+
+    def dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
+        seen["info"] = info
+        p = os.path.join(tmpdir, "video.mp4")
+        open(p, "wb").close()
+        return p
+
+    monkeypatch.setattr(ytdl, "download", dl)
+    await b.handle_update(msg("https://youtu.be/abc"))
+    await b.handle_update(cb(data_of(tg.last_markup(), "360p")))
+    assert seen["info"] is not None and seen["info"]["id"] == "abc"      # no second extraction
+    path, size, thumb, extra = tg.uploads[0]
+    assert thumb and thumb.endswith("thumb.jpg")
+    assert extra["width"] == 640 and extra["height"] == 360 and extra["duration"] == 600
+
+
+async def test_stale_info_is_not_reused(setup, monkeypatch):
+    b, tg = setup
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None: yt_info())
+    seen = {}
+
+    def dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
+        seen["info"] = info
+        p = os.path.join(tmpdir, "video.mp4")
+        open(p, "wb").close()
+        return p
+
+    monkeypatch.setattr(ytdl, "download", dl)
+    monkeypatch.setattr(botmod, "INFO_FRESH", -1)
+    await b.handle_update(msg("https://youtu.be/abc"))
+    await b.handle_update(cb(data_of(tg.last_markup(), "360p")))
+    assert seen["info"] is None
+
+
+async def test_progress_texts_show_download_then_upload(setup, monkeypatch):
+    import asyncio
+    import time as _t
+
+    b, tg = setup
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None: yt_info())
+
+    def slow_dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
+        progress["cur"] = 15 * MB          # half of the 30 MB estimate
+        _t.sleep(0.15)
+        p = os.path.join(tmpdir, "video.mp4")
+        open(p, "wb").close()
+        return p
+
+    async def slow_up(chat, video, *, is_file, caption="", thumb=None, progress=None, **extra):
+        progress["up_total"], progress["up"] = 100, 40
+        await asyncio.sleep(0.15)
+        return {"message_id": 2, "video": {"file_id": "X"}}
+
+    monkeypatch.setattr(ytdl, "download", slow_dl)
+    tg.send_video = slow_up
+    await b.handle_update(msg("https://youtu.be/abc"))
+    await b.handle_update(cb(data_of(tg.last_markup(), "360p")))
+    texts = tg.texts()
+    assert T.downloading(50, 30 * MB) in texts
+    assert T.uploading(40) in texts and T.uploading(40).endswith("۴۰٪")
+
+
+async def test_bench_endpoint(aiohttp_client, monkeypatch):
+    monkeypatch.setattr(botmod, "make_thumb", fake_thumb)
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None: yt_info())
+
+    def dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
+        progress.update(t_start=1.0, t_first_byte=1.5, t_dl_end=3.0, done=1000, files=[(1000, 1.5)])
+        p = os.path.join(tmpdir, "video.mp4")
+        open(p, "wb").close()
+        return p
+
+    monkeypatch.setattr(ytdl, "download", dl)
+    c = cfg()
+    c.owner_id, c.bench_key = OWNER, "bk"
+    tg = FakeTG()
+    client = await aiohttp_client(make_app(c, tg))
+    assert (await client.get("/bench?url=x")).status == 403
+    r = await client.get("/bench?k=bk&url=https://youtu.be/abc&p=360")
+    body = await r.json()
+    assert r.status == 200, body
+    assert body["label"] == "360p" and body["reuse"] is True and body["prep"] == 0.5 and body["transfer"] == 1.5
+    assert ("delete", {"mid": 2}) in tg.calls          # test message removed at once
+    assert tg.uploads[0][3].get("disable_notification") is True

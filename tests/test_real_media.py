@@ -98,3 +98,85 @@ async def test_extract_generic_gives_options(aiohttp_client, media):
     info = await asyncio.to_thread(ytdl.extract, url("muxed.mp4"))
     opts = build_options(info)
     assert opts and opts[0].spec
+
+
+async def test_ytdlp_download_reuses_extracted_info(aiohttp_client, media):
+    hits = []
+
+    async def counted(request):
+        hits.append(request.method)
+        return web.FileResponse(os.path.join(media, "muxed.mp4"))
+
+    app = web.Application()
+    app.router.add_route("*", "/clip.mp4", counted)
+    c = await aiohttp_client(app)
+    url = str(c.make_url("/clip.mp4"))
+    info = await asyncio.to_thread(ytdl.extract, url)
+    n_extract = len(hits)
+    tmp = tempfile.mkdtemp(prefix="dl-")
+    try:
+        progress = {}
+        path = await asyncio.to_thread(ytdl.download, url, "b", tmp, progress, None, None, info=info)
+        assert probe(path) == ["audio", "video"]
+        assert len(hits) - n_extract == 1          # only the media fetch, no second extraction
+        assert progress["t_first_byte"] >= progress["t_start"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+async def test_make_thumb_resizes_and_passes_small_jpeg(aiohttp_client, media):
+    import aiohttp
+
+    from dlbot.thumbs import make_thumb, pick_thumb
+
+    big = os.path.join(media, "big.jpg")
+    run(["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=size=1080x1920", "-frames:v", "1", big])
+    small = os.path.join(media, "small.jpg")
+    run(["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180", "-frames:v", "1", small])
+    url = await serve(aiohttp_client, media)
+    tmp = tempfile.mkdtemp(prefix="th-")
+    try:
+        async with aiohttp.ClientSession() as s:
+            out = await make_thumb(s, {"thumbnail": url("big.jpg")}, tmp)
+            assert out and os.path.getsize(out) <= 200 * 1024
+            dims = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                                   out], capture_output=True, text=True, creationflags=NOWIN).stdout.strip()
+            assert dims == "180,320"
+            os.remove(out)
+            info = {"thumbnails": [{"url": url("small.jpg"), "width": 320, "height": 180},
+                                   {"url": url("big.jpg"), "width": 1080}]}
+            assert pick_thumb(info) == (url("small.jpg"), False)
+            out = await make_thumb(s, info, tmp)
+            assert open(out, "rb").read() == open(small, "rb").read()
+            assert await make_thumb(s, {"thumbnail": url("missing.jpg")}, tmp) is None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+async def test_send_video_multipart_with_thumb_and_progress(aiohttp_client, media):
+    from dlbot.tg import Telegram
+
+    got = {}
+
+    async def send_video(request):
+        form = await request.post()
+        got.update(fields={k: form[k] for k in ("chat_id", "supports_streaming", "width", "duration")},
+                   video=len(form["video"].file.read()), thumb=form["thumbnail"].file.read()[:3])
+        return web.json_response({"ok": True, "result": {"message_id": 9, "video": {"file_id": "F"}}})
+
+    srv = web.Application()
+    srv.router.add_post("/bot1:x/sendVideo", send_video)
+    c = await aiohttp_client(srv)
+    thumb = os.path.join(media, "t.jpg")
+    run(["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=size=160x90", "-frames:v", "1", thumb])
+    tg = Telegram("1:x", str(c.make_url("")).rstrip("/"))
+    progress = {}
+    try:
+        res = await tg.send_video(5, os.path.join(media, "muxed.mp4"), is_file=True, caption="c", thumb=thumb,
+                                  progress=progress, width=320, duration=3)
+    finally:
+        await tg.close()
+    size = os.path.getsize(os.path.join(media, "muxed.mp4"))
+    assert res["message_id"] == 9 and got["video"] == size and got["thumb"] == b"\xff\xd8\xff"
+    assert got["fields"] == {"chat_id": "5", "supports_streaming": "true", "width": "320", "duration": "3"}
+    assert progress == {"up": size, "up_total": size}

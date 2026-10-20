@@ -1,6 +1,7 @@
 """Tiny Telegram Bot API client on aiohttp (no heavy framework)."""
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -8,6 +9,21 @@ import os
 import aiohttp
 
 log = logging.getLogger("tg")
+
+
+class CountingReader(io.BufferedReader):
+    """File reader that counts bytes read (aiohttp reads upload bodies through .read())."""
+
+    def __init__(self, path: str, progress: dict):
+        super().__init__(io.FileIO(path, "rb"))
+        self._progress = progress
+        progress["up"] = 0
+        progress["up_total"] = os.path.getsize(path)
+
+    def read(self, n=-1):
+        data = super().read(n)
+        self._progress["up"] += len(data)
+        return data
 
 
 class TgError(Exception):
@@ -41,8 +57,13 @@ class Telegram:
             raise TgError(method, body.get("description", "unknown"), body.get("error_code"))
         return body["result"]
 
-    async def send_video_file(self, chat_id: int, path: str, caption: str = "", **extra):
-        """Multipart upload streamed from disk (no full read into RAM)."""
+    async def send_video(self, chat_id: int, video: str, *, is_file: bool, caption: str = "",
+                         thumb: str | None = None, progress: dict | None = None, **extra):
+        """sendVideo as multipart. `video` is a local path (is_file) or a URL / file_id.
+
+        A local file is streamed from disk (never read whole into RAM); `progress["up"]`
+        counts the bytes sent so the status message can show a real upload %.
+        """
         s = await self.session()
         form = aiohttp.FormData()
         form.add_field("chat_id", str(chat_id))
@@ -52,10 +73,23 @@ class Telegram:
         for k, v in extra.items():
             if v is not None:
                 form.add_field(k, json.dumps(v) if isinstance(v, (dict, list)) else str(v))
-        with open(path, "rb") as fh:
-            form.add_field("video", fh, filename=os.path.basename(path), content_type="video/mp4")
+        handles = []
+        try:
+            if thumb:
+                th = open(thumb, "rb")
+                handles.append(th)
+                form.add_field("thumbnail", th, filename="thumb.jpg", content_type="image/jpeg")
+            if is_file:
+                fh = CountingReader(video, progress if progress is not None else {})
+                handles.append(fh)
+                form.add_field("video", fh, filename=os.path.basename(video), content_type="video/mp4")
+            else:
+                form.add_field("video", video)
             async with s.post(f"{self.base}/bot{self.token}/sendVideo", data=form) as r:
                 body = await r.json(content_type=None)
+        finally:
+            for h in handles:
+                h.close()
         if not body.get("ok"):
             raise TgError("sendVideo", body.get("description", "unknown"), body.get("error_code"))
         return body["result"]

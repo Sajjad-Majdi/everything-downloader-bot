@@ -5,10 +5,13 @@ import asyncio
 import hmac
 import logging
 import os
+import time
 
 from aiohttp import web
 
-from .bot import Bot
+from . import ytdl
+from .bot import Bot, Pending, auto_option
+from .formats import build_options, entries_of
 from .config import Config
 from .stream import Streamer
 from .tg import Telegram
@@ -39,6 +42,64 @@ async def webhook(request: web.Request) -> web.Response:
         return web.Response(status=400)
     request.app[BOT].spawn(request.app[BOT].handle_update(update))
     return web.Response(text="ok")  # answer at once; work runs in the background
+
+
+async def bench(request: web.Request) -> web.Response:
+    """Owner-only speed test: /bench?k=BENCH_KEY&url=...&p=360&reuse=1
+
+    Runs the real pipeline (extract, download, thumbnail, upload to the owner chat silently),
+    deletes the test message at once, and returns the per-phase timings as JSON.
+    """
+    cfg, bot = request.app[CFG], request.app[BOT]
+    if not cfg.bench_key or not hmac.compare_digest(request.query.get("k", ""), cfg.bench_key):
+        return web.Response(status=403)
+    if not cfg.bot_token or not cfg.owner_id:
+        return web.json_response({"error": "no token"}, status=503)
+    url = request.query.get("url", "")
+    want = request.query.get("p", "")
+    reuse = request.query.get("reuse", "1") == "1"
+    t0 = time.monotonic()
+    try:
+        async with bot.extracts:
+            info = await asyncio.to_thread(ytdl.extract, url, cfg.cookie_file)
+    except Exception as e:
+        return web.json_response({"error": f"extract: {e}"[:300]}, status=502)
+    extract_s = round(time.monotonic() - t0, 2)
+    index = None
+    entries = entries_of(info)
+    if entries:
+        index, info = next(((i + 1, e) for i, e in enumerate(entries) if build_options(e)), (None, info))
+    opts = build_options(info)
+    if not opts:
+        return web.json_response({"error": "no video formats", "extract": extract_s}, status=422)
+    opt = next((o for o in opts if want and o.label.startswith(want)), None) or auto_option(opts)
+    p = Pending(info.get("webpage_url") or url, info.get("title") or "", info.get("duration"), opts,
+                index=index, info=info)
+    try:
+        tm = await bot.run_job(cfg.owner_id, None, p, opt, reuse=reuse, quiet=True)
+    except Exception as e:
+        return web.json_response({"error": f"job: {type(e).__name__}: {e}"[:300], "extract": extract_s}, status=500)
+    if tm.get("msg"):
+        await bot.tg.delete(cfg.owner_id, tm.pop("msg"))
+    out = {"extract": extract_s, "label": opt.label, "options": [o.label for o in opts], **tm}
+    log.info("bench %s", out)
+    return web.json_response(out)
+
+
+WARMUP_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"  # 19 s public clip
+
+
+async def warm_up(app: web.Application):
+    """One YouTube extraction at boot fills the yt-dlp cache (player JS, solver), so the
+    first real link does not pay for it."""
+    await asyncio.sleep(3)
+    t0 = time.monotonic()
+    try:
+        async with app[BOT].extracts:
+            await asyncio.to_thread(ytdl.extract, WARMUP_URL, app[CFG].cookie_file)
+        log.info("timing warm-up extract=%.1fs", time.monotonic() - t0)
+    except Exception as e:
+        log.warning("warm-up failed after %.1fs: %s", time.monotonic() - t0, e)
 
 
 async def set_webhook(app: web.Application):
@@ -92,9 +153,12 @@ def make_app(cfg: Config | None = None, tg: Telegram | None = None) -> web.Appli
     app.router.add_get("/health", health)
     app.router.add_post("/webhook", webhook)
     app.router.add_get("/dl/{token}", app[STREAMER].handle)
+    app.router.add_get("/bench", bench)
 
     async def on_startup(app):
         app[BOT].spawn(set_webhook(app))
+        if cfg.bot_token and os.environ.get("WARMUP", "1") == "1":
+            app[BOT].spawn(warm_up(app))
 
     async def on_cleanup(app):
         await app[STREAMER].close()

@@ -1,6 +1,7 @@
 import os
 import sys
 
+os.environ["WARMUP"] = "0"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 MB = 1024 * 1024

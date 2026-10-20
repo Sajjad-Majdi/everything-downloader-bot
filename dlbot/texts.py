@@ -58,6 +58,12 @@ def downloading(pct: float | None, total: int | None) -> str:
     return fa(f"دارم دانلود می‌کنم… {pct:.0f}٪") + tail
 
 
+def uploading(pct: float | None) -> str:
+    if pct is None:
+        return UPLOADING
+    return fa(f"دارم برات می‌فرستمش… {pct:.0f}٪")
+
+
 def too_big_stream(size_txt: str) -> str:
     return (
         f"حجمش ({size_txt}) از سقف ۵۰ مگ تلگرام بیشتره.\n"

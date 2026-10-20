@@ -25,6 +25,8 @@ class Config:
     webhook_secret: str = ""
     link_key: bytes = b""
     allowed_ids: set[int] = field(default_factory=set)
+    owner_id: int | None = None
+    bench_key: str = ""
     api_base: str = "https://api.telegram.org"
     max_jobs: int = 1
     max_streams: int = 2
@@ -37,13 +39,16 @@ class Config:
         public = (env.get("PUBLIC_URL") or env.get("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
         secret = env.get("WEBHOOK_SECRET", "").strip() or (_derive(token, "webhook")[:48] if token else "")
         key = env.get("LINK_SECRET", "").strip() or (_derive(token, "links") if token else "")
-        ids = {int(x) for x in env.get("ALLOWED_USER_IDS", "394891587").replace(" ", "").split(",") if x}
+        id_list = [int(x) for x in env.get("ALLOWED_USER_IDS", "394891587").replace(" ", "").split(",") if x]
+        ids = set(id_list)
         cfg = cls(
             bot_token=token,
             public_url=public,
             webhook_secret=secret,
             link_key=key.encode(),
             allowed_ids=ids,
+            owner_id=id_list[0] if id_list else None,
+            bench_key=env.get("BENCH_KEY", "").strip(),
             api_base=env.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/"),
             max_jobs=max(1, int(env.get("MAX_JOBS", "1"))),
             max_streams=max(1, int(env.get("MAX_STREAMS", "2"))),
