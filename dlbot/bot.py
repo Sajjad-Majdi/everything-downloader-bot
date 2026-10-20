@@ -301,6 +301,8 @@ class Bot:
                 res = await self.tg.send_video(chat, path, is_file=True, caption=caption, thumb=thumb,
                                                progress=progress, **meta, **extra)
                 tm["upload"] = round(time.monotonic() - t1, 2)
+                if progress.get("t_up_done"):   # body fully sent; the rest is Telegram's processing
+                    tm["upload_body"] = round(progress["t_up_done"] - t1, 2)
                 return self._done(tm, t0, key, res)
         finally:
             if ticker:

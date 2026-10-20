@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import time
 
 import aiohttp
 
@@ -25,6 +26,8 @@ class CountingReader(io.BufferedReader):
         # matters on a 0.1 CPU host. aiohttp slices oversize chunks safely.
         data = super().read(max(n, 1 << 20) if n and n > 0 else n)
         self._progress["up"] += len(data)
+        if not data or self._progress["up"] >= self._progress["up_total"]:
+            self._progress.setdefault("t_up_done", time.monotonic())
         return data
 
 

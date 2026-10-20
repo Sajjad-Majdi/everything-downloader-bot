@@ -179,4 +179,4 @@ async def test_send_video_multipart_with_thumb_and_progress(aiohttp_client, medi
     size = os.path.getsize(os.path.join(media, "muxed.mp4"))
     assert res["message_id"] == 9 and got["video"] == size and got["thumb"] == b"\xff\xd8\xff"
     assert got["fields"] == {"chat_id": "5", "supports_streaming": "true", "width": "320", "duration": "3"}
-    assert progress == {"up": size, "up_total": size}
+    assert progress["up"] == progress["up_total"] == size and "t_up_done" in progress
