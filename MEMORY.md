@@ -30,7 +30,8 @@
 
 ## Deploy
 - Repo: github.com/Sajjad-Majdi/everything-downloader-bot (public), branch main.
-- Render: service `everything-downloader` (srv-dbbkqb67bikc738tbigg), https://everything-downloader-1r7j.onrender.com, Docker, free, Singapore, health /health (shows running commit), same workspace as HadithYab. No auto-deploy: after a push, `curl -X POST $RENDER_DEPLOY_HOOK` (or dashboard Manual Deploy > Deploy latest commit).
+- Render (live from 2026-10-20): service `everything-downloader-fra` (srv-dbbot20u01pc73egjn40), https://everything-downloader-fra.onrender.com, Docker, free, Frankfurt (near Telegram's Bot API; Singapore uploads crawled), health /health (shows running commit), same workspace as HadithYab. No auto-deploy: after a push, `curl -X POST $RENDER_DEPLOY_HOOK` (or dashboard Manual Deploy > Deploy latest commit).
+- Old Singapore service `everything-downloader` (srv-dbbkqb67bikc738tbigg, everything-downloader-1r7j.onrender.com): to be suspended once Frankfurt is verified with the real token.
 - Keep-alive: Cloudflare Worker `downloader-keepalive` (`keepalive/`, cron */13 -> /health), `wrangler deploy` from `keepalive/` (laptop needs HTTPS_PROXY=http://127.0.0.1:10808).
 - Update yt-dlp: bump the pin in `requirements.txt`, push, deploy.
 
