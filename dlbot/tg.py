@@ -60,6 +60,21 @@ class Telegram:
             raise TgError("sendVideo", body.get("description", "unknown"), body.get("error_code"))
         return body["result"]
 
+    async def call_with_file(self, method: str, field: str, path: str, content_type: str, **params):
+        """Multipart call with one attached file (sent as attach://<field>)."""
+        s = await self.session()
+        form = aiohttp.FormData()
+        for k, v in params.items():
+            if v is not None:
+                form.add_field(k, json.dumps(v) if isinstance(v, (dict, list)) else str(v))
+        with open(path, "rb") as fh:
+            form.add_field(field, fh, filename=os.path.basename(path), content_type=content_type)
+            async with s.post(f"{self.base}/bot{self.token}/{method}", data=form) as r:
+                body = await r.json(content_type=None)
+        if not body.get("ok"):
+            raise TgError(method, body.get("description", "unknown"), body.get("error_code"))
+        return body["result"]
+
     # thin helpers -----------------------------------------------------------
     async def send(self, chat_id, text, reply_markup=None, reply_to=None):
         return await self.call(

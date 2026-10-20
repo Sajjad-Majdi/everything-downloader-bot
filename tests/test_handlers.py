@@ -295,3 +295,69 @@ async def test_dl_proxy_streams_with_range(aiohttp_client, monkeypatch):
     assert "attachment" in r.headers["Content-Disposition"]
     r = await client.get(f"/dl/{tok}", headers={"Range": "bytes=100-"})
     assert r.status == 206 and await r.read() == payload[100:]
+
+
+async def test_bot_photo_set_only_when_missing(tmp_path):
+    from dlbot.server import ensure_photo
+
+    icon = tmp_path / "i.jpg"
+    icon.write_bytes(b"\xff\xd8jpg")
+
+    class PhotoTG(FakeTG):
+        def __init__(self, count):
+            super().__init__()
+            self.count = count
+            self.files = []
+
+        async def call(self, method, **p):
+            self.calls.append((method, p))
+            return {"getMe": {"id": 777}, "getUserProfilePhotos": {"total_count": self.count, "photos": []}}[method]
+
+        async def call_with_file(self, method, field, path, ctype, **p):
+            self.files.append((method, field, path, p))
+            return True
+
+    tg = PhotoTG(0)
+    await ensure_photo(tg, str(icon))
+    assert ("getUserProfilePhotos", {"user_id": 777, "limit": 1}) in tg.calls
+    assert tg.files == [("setMyProfilePhoto", "pic", str(icon), {"photo": {"type": "static", "photo": "attach://pic"}})]
+    tg = PhotoTG(1)
+    await ensure_photo(tg, str(icon))
+    assert tg.files == []
+
+    class Broken(FakeTG):
+        async def call(self, method, **p):
+            raise TgError(method, "boom")
+
+    await ensure_photo(Broken(), str(icon))   # logs, never raises
+
+
+async def test_call_with_file_sends_multipart(aiohttp_client, tmp_path):
+    import json as _json
+
+    from aiohttp import web
+
+    from dlbot.tg import Telegram
+
+    got = {}
+
+    async def method(request):
+        form = await request.post()
+        got["path"] = request.path
+        got["photo"] = _json.loads(form["photo"])
+        got["pic"] = form["pic"].file.read()
+        return web.json_response({"ok": True, "result": True})
+
+    srv = web.Application()
+    srv.router.add_post("/bot1:x/setMyProfilePhoto", method)
+    c = await aiohttp_client(srv)
+    icon = tmp_path / "i.jpg"
+    icon.write_bytes(b"JPEGDATA")
+    tg = Telegram("1:x", str(c.make_url("")).rstrip("/"))
+    try:
+        await tg.call_with_file("setMyProfilePhoto", "pic", str(icon), "image/jpeg",
+                                photo={"type": "static", "photo": "attach://pic"})
+    finally:
+        await tg.close()
+    assert got == {"path": "/bot1:x/setMyProfilePhoto", "photo": {"type": "static", "photo": "attach://pic"},
+                   "pic": b"JPEGDATA"}

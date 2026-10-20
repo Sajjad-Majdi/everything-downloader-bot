@@ -14,6 +14,8 @@ from .stream import Streamer
 from .tg import Telegram
 
 log = logging.getLogger("server")
+ICON = os.environ.get("BOT_ICON") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                                  "assets", "bot_icon.jpg")
 CFG = web.AppKey("cfg", Config)
 BOT = web.AppKey("bot", Bot)
 STREAMER = web.AppKey("streamer", Streamer)
@@ -53,10 +55,29 @@ async def set_webhook(app: web.Application):
                           allowed_updates=["message", "callback_query"], max_connections=4)
             await tg.call("setMyCommands", commands=[{"command": "start", "description": "راهنما"}])
             log.info("webhook set to %s/webhook", cfg.public_url)
-            return
+            break
         except Exception as e:
             log.warning("setWebhook attempt %d failed: %s", attempt + 1, e)
             await asyncio.sleep(5 * (attempt + 1))
+    await ensure_photo(tg)
+
+
+async def ensure_photo(tg: Telegram, icon: str = ICON):
+    """Give the bot its profile photo once; never blocks or breaks startup."""
+    try:
+        me = await tg.call("getMe")
+        photos = await tg.call("getUserProfilePhotos", user_id=me["id"], limit=1)
+        if photos.get("total_count", 0) > 0:
+            log.info("bot photo already set")
+            return
+        if not os.path.exists(icon):
+            log.warning("bot icon missing at %s", icon)
+            return
+        await tg.call_with_file("setMyProfilePhoto", "pic", icon, "image/jpeg",
+                                photo={"type": "static", "photo": "attach://pic"})
+        log.info("bot profile photo set")
+    except Exception as e:
+        log.warning("bot photo step failed: %s", e)
 
 
 def make_app(cfg: Config | None = None, tg: Telegram | None = None) -> web.Application:
