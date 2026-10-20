@@ -119,7 +119,7 @@ async def test_start_and_no_link(setup):
 
 async def test_menu_then_upload_then_cache(setup, monkeypatch):
     b, tg = setup
-    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None: yt_info())
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: yt_info())
     seen = {}
 
     def fake_download(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
@@ -148,7 +148,7 @@ async def test_menu_then_upload_then_cache(setup, monkeypatch):
 
 async def test_big_youtube_gives_signed_stream_link(setup, monkeypatch):
     b, tg = setup
-    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None: yt_info())
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: yt_info())
     await b.handle_update(msg("https://youtu.be/abc"))
     await b.handle_update(cb(data_of(tg.last_markup(), "1080p")))
     url = data_of(tg.last_markup(), T.BUTTON_DL)
@@ -164,7 +164,7 @@ async def test_unknown_size_too_big_falls_back_to_link(setup, monkeypatch):
         f.pop("filesize", None)
         f.pop("filesize_approx", None)
         f.pop("tbr", None)
-    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None: info)
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: info)
     dirs = []
 
     def too_big(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
@@ -180,7 +180,7 @@ async def test_unknown_size_too_big_falls_back_to_link(setup, monkeypatch):
 
 async def test_instagram_small_is_sent_by_url(setup, monkeypatch):
     b, tg = setup
-    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None: insta_info())
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: insta_info())
     await b.handle_update(msg("https://www.instagram.com/reel/C1/"))
     await b.handle_update(cb(data_of(tg.last_markup(), "720p")))
     sent = [p for m, p in tg.calls if m == "sendVideo"]
@@ -191,7 +191,7 @@ async def test_instagram_small_is_sent_by_url(setup, monkeypatch):
 async def test_url_send_failure_falls_back_to_upload(monkeypatch):
     tg = FakeTG(fail_url_send=True)
     b = botmod.Bot(cfg(), tg)
-    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None: insta_info())
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: insta_info())
 
     def dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
         p = os.path.join(tmpdir, "video.mp4")
@@ -210,7 +210,7 @@ async def test_carousel_menu_and_all(setup, monkeypatch):
     item2["formats"][2]["url"] = "https://scontent.cdninstagram.com/v/two.mp4"
     image = {"id": "img", "url": "https://scontent.cdninstagram.com/i.jpg", "ext": "jpg", "vcodec": "none",
              "acodec": "none"}
-    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None: {"_type": "playlist", "title": "Post",
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: {"_type": "playlist", "title": "Post",
                                                               "entries": [item1, image, item2]})
     await b.handle_update(msg("https://www.instagram.com/p/X/"))
     assert tg.texts()[-1] == T.CAROUSEL.format(n=T.fa(2))
@@ -223,7 +223,7 @@ async def test_youtube_playlist_offers_items(setup, monkeypatch):
     b, tg = setup
     calls = []
 
-    def extract(url, c=None, e=None):
+    def extract(url, c=None, e=None, f=True):
         calls.append(url)
         if "playlist" in url:
             return {"_type": "playlist", "title": "PL", "entries": [
@@ -242,7 +242,7 @@ async def test_youtube_playlist_offers_items(setup, monkeypatch):
 async def test_extract_error_is_persian(setup, monkeypatch):
     b, tg = setup
 
-    def boom(url, c=None, e=None):
+    def boom(url, c=None, e=None, f=True):
         raise RuntimeError("ERROR: [youtube] abc: Sign in to confirm you're not a bot")
 
     monkeypatch.setattr(ytdl, "extract", boom)
@@ -381,7 +381,7 @@ async def test_call_with_file_sends_multipart(aiohttp_client, tmp_path):
 
 async def test_download_reuses_menu_info_and_sends_thumb(setup, monkeypatch):
     b, tg = setup
-    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None: yt_info())
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: yt_info())
     seen = {}
 
     def dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
@@ -401,7 +401,7 @@ async def test_download_reuses_menu_info_and_sends_thumb(setup, monkeypatch):
 
 async def test_stale_info_is_not_reused(setup, monkeypatch):
     b, tg = setup
-    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None: yt_info())
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: yt_info())
     seen = {}
 
     def dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
@@ -422,7 +422,7 @@ async def test_progress_texts_show_download_then_upload(setup, monkeypatch):
     import time as _t
 
     b, tg = setup
-    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None: yt_info())
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: yt_info())
 
     def slow_dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
         progress["cur"] = 15 * MB          # half of the 30 MB estimate
@@ -447,7 +447,7 @@ async def test_progress_texts_show_download_then_upload(setup, monkeypatch):
 
 async def test_bench_endpoint(aiohttp_client, monkeypatch):
     monkeypatch.setattr(botmod, "make_thumb", fake_thumb)
-    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None: yt_info())
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: yt_info())
 
     def dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
         progress.update(t_start=1.0, t_first_byte=1.5, t_dl_end=3.0, done=1000, files=[(1000, 1.5)])
