@@ -27,7 +27,8 @@ TG = web.AppKey("tg", Telegram)
 
 async def health(request: web.Request) -> web.Response:
     bot = request.app[BOT]
-    return web.json_response({"ok": True, "token": bool(request.app[CFG].bot_token),
+    return web.json_response({"ok": True, "commit": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
+                              "token": bool(request.app[CFG].bot_token),
                               "tasks": len(bot.tasks), "streams": request.app[STREAMER].active})
 
 
