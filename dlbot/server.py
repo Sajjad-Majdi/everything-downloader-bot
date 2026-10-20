@@ -130,7 +130,13 @@ async def netbench(request: web.Request) -> web.Response:
             sent += len(chunk)
             yield chunk
 
-    session = await bot.tg.session()
+    import aiohttp
+
+    from .tg import upload_socket
+    holder: dict = {}
+    fresh = request.query.get("fresh", "1") == "1"
+    session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(
+        force_close=True, socket_factory=lambda ai: upload_socket(ai, holder))) if fresh else await bot.tg.session()
     t0 = time.monotonic()
     try:
         if target == "cf":
@@ -148,8 +154,11 @@ async def netbench(request: web.Request) -> web.Response:
     except Exception as e:
         return web.json_response({"error": f"{type(e).__name__}: {e}"[:200], "sent": sent,
                                   "secs": round(time.monotonic() - t0, 2)})
+    finally:
+        if fresh:
+            await session.close()
     secs = round(time.monotonic() - t0, 2)
-    return web.json_response({"target": target, "mb": round(sent / 1048576, 1), "secs": secs,
+    return web.json_response({"target": target, "cc": holder.get("cc"), "mb": round(sent / 1048576, 1), "secs": secs,
                               "mb_s": round(sent / 1048576 / max(secs, 0.01), 2), "status": status})
 
 
