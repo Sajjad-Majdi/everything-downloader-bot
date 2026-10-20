@@ -156,3 +156,50 @@ def test_jsc_preprocessed_player_cache_enabled():
 
     from dlbot import ytdl
     assert ytdl.JSC_CACHE is True and EJSBaseJCP._ENABLE_PREPROCESSED_PLAYER_CACHE is True
+
+
+class _FakeYDL:
+    calls = []
+    fail_fast = False
+    fast_formats = [{"format_id": "18", "url": "https://rr.googlevideo.com/x", "vcodec": "avc1"}]
+
+    def __init__(self, opts):
+        self.opts = opts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def extract_info(self, url, download=False):
+        pc = (self.opts.get("extractor_args") or {}).get("youtube", {}).get("player_client")
+        _FakeYDL.calls.append((pc, self.opts.get("cookiefile")))
+        if pc and _FakeYDL.fail_fast:
+            raise RuntimeError("Failed to extract any player response")
+        return {"id": "v", "formats": _FakeYDL.fast_formats if pc else [{"format_id": "137", "url": "u",
+                                                                            "vcodec": "avc1"}]}
+
+    @staticmethod
+    def sanitize_info(info, remove=False):
+        return info
+
+
+def test_youtube_fast_client_first_then_fallback(monkeypatch):
+    from dlbot import ytdl
+    monkeypatch.setattr(ytdl, "YoutubeDL", _FakeYDL)
+    monkeypatch.setattr(ytdl, "FAST_CLIENT", "visionos")
+    _FakeYDL.calls, _FakeYDL.fail_fast = [], False
+    info = ytdl.extract("https://youtu.be/abc", "/tmp/cookies.txt")
+    assert info["_fast_client"] == "visionos" and _FakeYDL.calls == [(["visionos"], None)]   # no cookies, one call
+    _FakeYDL.calls, _FakeYDL.fail_fast = [], True
+    info = ytdl.extract("https://www.youtube.com/watch?v=abc", "/tmp/cookies.txt")
+    assert "_fast_client" not in info and _FakeYDL.calls == [(["visionos"], None), (None, "/tmp/cookies.txt")]
+    _FakeYDL.calls = []
+    ytdl.extract("https://www.instagram.com/reel/x/", "/tmp/cookies.txt")          # not YouTube: no fast try
+    ytdl.extract("https://www.youtube.com/playlist?list=PL1", None)               # playlists: no fast try
+    ytdl.extract("https://youtu.be/abc", None, None, False)                       # explicitly off
+    assert [c[0] for c in _FakeYDL.calls] == [None, None, None]
+    _FakeYDL.calls, _FakeYDL.fail_fast = [], False
+    monkeypatch.setattr(_FakeYDL, "fast_formats", [{"format_id": "sb", "url": "u", "vcodec": "none"}])
+    assert "_fast_client" not in ytdl.extract("https://youtu.be/abc", None)       # no video formats -> fallback

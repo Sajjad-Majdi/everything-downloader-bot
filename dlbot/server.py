@@ -67,13 +67,15 @@ async def bench(request: web.Request) -> web.Response:
     t0 = time.monotonic()
     try:
         async with bot.extracts:
-            info = await asyncio.to_thread(ytdl.extract, url, cfg.cookie_file, extra)
+            fast = request.query.get("fast", "1") == "1" and not request.query.get("pc")
+            info = await asyncio.to_thread(ytdl.extract, url, cfg.cookie_file, extra, fast)
     except Exception as e:
         return web.json_response({"error": f"extract: {e}"[:300], "log": dbg.lines[-60:] if dbg else None},
                                  status=502)
     extract_s = round(time.monotonic() - t0, 2)
     if request.query.get("only") == "extract":
         return web.json_response({"extract": extract_s, "formats": len(info.get("formats") or []),
+                                  "client": info.get("_fast_client") or "default",
                                   "log": dbg.lines[-120:] if dbg else None})
     index = None
     entries = entries_of(info)
@@ -91,7 +93,7 @@ async def bench(request: web.Request) -> web.Response:
         return web.json_response({"error": f"job: {type(e).__name__}: {e}"[:300], "extract": extract_s}, status=500)
     if tm.get("msg"):
         await bot.tg.delete(cfg.owner_id, tm.pop("msg"))
-    out = {"extract": extract_s, "label": opt.label, "options": [o.label for o in opts], **tm}
+    out = {"extract": extract_s, "client": info.get("_fast_client") or "default", "label": opt.label, "options": [o.label for o in opts], **tm}
     log.info("bench %s", out)
     return web.json_response(out)
 
@@ -106,7 +108,7 @@ async def warm_up(app: web.Application):
     t0 = time.monotonic()
     try:
         async with app[BOT].extracts:
-            await asyncio.to_thread(ytdl.extract, WARMUP_URL, app[CFG].cookie_file)
+            await asyncio.to_thread(ytdl.extract, WARMUP_URL, app[CFG].cookie_file, None, False)
         log.info("timing warm-up extract=%.1fs", time.monotonic() - t0)
     except Exception as e:
         log.warning("warm-up failed after %.1fs: %s", time.monotonic() - t0, e)

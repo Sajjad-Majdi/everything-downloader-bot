@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import re
 import tempfile
 import time
 
@@ -92,8 +93,32 @@ class DebugLog:
     debug = info = warning = error = _add
 
 
-def extract(url: str, cookie_file: str | None = None, extra: dict | None = None) -> dict:
-    with YoutubeDL(base_opts(cookie_file) | (extra or {})) as ydl:
+YT_RE = re.compile(r"^https?://([\w-]+\.)?(youtube\.com|youtu\.be|youtube-nocookie\.com)/", re.I)
+# A YouTube client that needs no JS player (no deno run) and no cookies; tried first.
+FAST_CLIENT = os.environ.get("YT_FAST_CLIENT", "visionos").strip()
+
+
+def _usable(info: dict) -> bool:
+    return any(f.get("url") and f.get("vcodec") != "none" for f in info.get("formats") or [])
+
+
+def extract(url: str, cookie_file: str | None = None, extra: dict | None = None, fast: bool = True) -> dict:
+    """Extract info. For a single YouTube video, first try the fast JS-less client without
+    cookies (~2-3 s at 0.1 CPU); fall back to the full path (cookies + deno) when it fails."""
+    extra = extra or {}
+    if fast and FAST_CLIENT and YT_RE.match(url) and "list=" not in url and "/playlist" not in url:
+        opts = base_opts(None) | extra | {
+            "extractor_args": {"youtube": {"player_client": FAST_CLIENT.split(",")}}}
+        try:
+            with YoutubeDL(opts) as ydl:
+                info = ydl.sanitize_info(ydl.extract_info(url, download=False))
+            if _usable(info):
+                info["_fast_client"] = FAST_CLIENT
+                return info
+            log.info("fast client gave no usable formats; full extraction")
+        except Exception as e:
+            log.info("fast client failed (%s); full extraction", str(e)[:120])
+    with YoutubeDL(base_opts(cookie_file) | extra) as ydl:
         info = ydl.extract_info(url, download=False)
         return ydl.sanitize_info(info)
 
