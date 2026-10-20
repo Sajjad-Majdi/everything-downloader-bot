@@ -86,6 +86,9 @@ async def bench(request: web.Request) -> web.Response:
     if not opts:
         return web.json_response({"error": "no video formats", "extract": extract_s}, status=422)
     opt = next((o for o in opts if want and o.label.startswith(want)), None) or auto_option(opts)
+    if request.query.get("spec"):   # diagnostics: force an exact yt-dlp format spec
+        from dataclasses import replace
+        opt = replace(opt, spec=request.query["spec"], size=None)
     p = Pending(info.get("webpage_url") or url, info.get("title") or "", info.get("duration"), opts,
                 index=index, info=info)
     if request.query.get("nothumb") == "1":
@@ -95,7 +98,8 @@ async def bench(request: web.Request) -> web.Response:
         opt.video = {k: v for k, v in opt.video.items() if k not in ("width", "height")}
     try:
         tm = await bot.run_job(cfg.owner_id, None, p, opt, reuse=reuse, quiet=True,
-                               diag={"diskread": request.query.get("diskread") == "1"})
+                               diag={"diskread": request.query.get("diskread") == "1",
+                                     "asdoc": request.query.get("asdoc") == "1"})
     except Exception as e:
         return web.json_response({"error": f"job: {type(e).__name__}: {e}"[:300], "extract": extract_s}, status=500)
     if tm.get("msg"):

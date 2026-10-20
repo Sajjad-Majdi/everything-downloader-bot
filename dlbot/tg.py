@@ -63,7 +63,8 @@ class Telegram:
         return body["result"]
 
     async def send_video(self, chat_id: int, video: str, *, is_file: bool, caption: str = "",
-                         thumb: str | None = None, progress: dict | None = None, **extra):
+                         thumb: str | None = None, progress: dict | None = None, method: str = "sendVideo",
+                         **extra):
         """sendVideo as multipart. `video` is a local path (is_file) or a URL / file_id.
 
         A local file is streamed from disk (never read whole into RAM); `progress["up"]`
@@ -72,7 +73,9 @@ class Telegram:
         s = await self.session()
         form = aiohttp.FormData()
         form.add_field("chat_id", str(chat_id))
-        form.add_field("supports_streaming", "true")
+        field = "document" if method == "sendDocument" else "video"
+        if field == "video":
+            form.add_field("supports_streaming", "true")
         if caption:
             form.add_field("caption", caption[:1024])
         for k, v in extra.items():
@@ -87,16 +90,16 @@ class Telegram:
             if is_file:
                 fh = CountingReader(video, progress if progress is not None else {})
                 handles.append(fh)
-                form.add_field("video", fh, filename=os.path.basename(video), content_type="video/mp4")
+                form.add_field(field, fh, filename=os.path.basename(video), content_type="video/mp4")
             else:
-                form.add_field("video", video)
-            async with s.post(f"{self.base}/bot{self.token}/sendVideo", data=form) as r:
+                form.add_field(field, video)
+            async with s.post(f"{self.base}/bot{self.token}/{method}", data=form) as r:
                 body = await r.json(content_type=None)
         finally:
             for h in handles:
                 h.close()
         if not body.get("ok"):
-            raise TgError("sendVideo", body.get("description", "unknown"), body.get("error_code"))
+            raise TgError(method, body.get("description", "unknown"), body.get("error_code"))
         return body["result"]
 
     async def call_with_file(self, method: str, field: str, path: str, content_type: str, **params):
