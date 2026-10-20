@@ -12,6 +12,7 @@ RUN pip install -r requirements.txt \
  && yt-dlp --version && deno --version && ffmpeg -version | head -1
 
 COPY dlbot ./dlbot
+COPY assets ./assets
 RUN useradd -m bot && chown -R bot /app
 USER bot
 
