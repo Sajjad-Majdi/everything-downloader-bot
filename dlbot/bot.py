@@ -308,6 +308,9 @@ class Bot:
                     tm["disk_read"] = await asyncio.to_thread(_time_read, path)
                 progress["phase"] = "up"
                 t1 = time.monotonic()
+                if diag and diag.get("asdoc"):
+                    extra = dict(extra, method="sendDocument")
+                    meta = {}
                 res = await self.tg.send_video(chat, path, is_file=True, caption=caption, thumb=thumb,
                                                progress=progress, **meta, **extra)
                 tm["upload"] = round(time.monotonic() - t1, 2)
