@@ -58,13 +58,23 @@ async def bench(request: web.Request) -> web.Response:
     url = request.query.get("url", "")
     want = request.query.get("p", "")
     reuse = request.query.get("reuse", "1") == "1"
+    extra, dbg = {}, None
+    if request.query.get("pc"):
+        extra["extractor_args"] = {"youtube": {"player_client": request.query["pc"].split(",")}}
+    if request.query.get("dbg") == "1":
+        dbg = ytdl.DebugLog()
+        extra |= {"logger": dbg, "verbose": True, "quiet": False}
     t0 = time.monotonic()
     try:
         async with bot.extracts:
-            info = await asyncio.to_thread(ytdl.extract, url, cfg.cookie_file)
+            info = await asyncio.to_thread(ytdl.extract, url, cfg.cookie_file, extra)
     except Exception as e:
-        return web.json_response({"error": f"extract: {e}"[:300]}, status=502)
+        return web.json_response({"error": f"extract: {e}"[:300], "log": dbg.lines[-60:] if dbg else None},
+                                 status=502)
     extract_s = round(time.monotonic() - t0, 2)
+    if request.query.get("only") == "extract":
+        return web.json_response({"extract": extract_s, "formats": len(info.get("formats") or []),
+                                  "log": dbg.lines[-120:] if dbg else None})
     index = None
     entries = entries_of(info)
     if entries:

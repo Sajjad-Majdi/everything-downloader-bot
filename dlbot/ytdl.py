@@ -55,8 +55,24 @@ def base_opts(cookie_file: str | None = None) -> dict:
     return opts
 
 
-def extract(url: str, cookie_file: str | None = None) -> dict:
-    with YoutubeDL(base_opts(cookie_file)) as ydl:
+class DebugLog:
+    """Collects yt-dlp debug lines with time offsets (for /bench diagnostics)."""
+
+    def __init__(self):
+        self.t0 = time.monotonic()
+        self.lines: list[str] = []
+
+    def _add(self, msg):
+        low = msg.lower()
+        if "cookie" in low or "authorization" in low or "http headers" in low:
+            return
+        self.lines.append(f"{time.monotonic() - self.t0:6.2f} {msg[:160]}")
+
+    debug = info = warning = error = _add
+
+
+def extract(url: str, cookie_file: str | None = None, extra: dict | None = None) -> dict:
+    with YoutubeDL(base_opts(cookie_file) | (extra or {})) as ydl:
         info = ydl.extract_info(url, download=False)
         return ydl.sanitize_info(info)
 
