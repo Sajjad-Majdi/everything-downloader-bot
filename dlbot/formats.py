@@ -94,7 +94,13 @@ def _best_audio(fmts: list[dict]) -> dict | None:
     auds = [f for f in fmts if is_audio_only(f)]
     if not auds:
         return None
-    return max(auds, key=lambda f: (f.get("ext") == "m4a", proto_score(f), f.get("abr") or f.get("tbr") or 0))
+    return max(auds, key=lambda f: (f.get("ext") == "m4a", not is_drc(f), proto_score(f),
+                                    f.get("abr") or f.get("tbr") or 0))
+
+
+def is_drc(f: dict) -> bool:
+    """YouTube's dynamic-range-compressed audio twin (e.g. 140-drc)."""
+    return "drc" in str(f.get("format_id", "")).lower() or "drc" in str(f.get("format_note", "")).lower()
 
 
 def _make(label: str, v: dict, audio: dict | None, duration, best=False) -> Option:

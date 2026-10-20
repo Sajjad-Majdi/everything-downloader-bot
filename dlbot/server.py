@@ -109,6 +109,50 @@ async def bench(request: web.Request) -> web.Response:
     return web.json_response(out)
 
 
+async def netbench(request: web.Request) -> web.Response:
+    """Owner-only egress test: /netbench?k=..&mb=20&target=tg|cf
+
+    tg: POST the bytes as a sendDocument to chat_id 0 (Telegram reads the body, then answers
+    "chat not found"; nothing is sent to anyone). cf: POST to Cloudflare's speed-test sink.
+    Tells whether a slow upload is Telegram's intake or Render's egress.
+    """
+    cfg, bot = request.app[CFG], request.app[BOT]
+    if not cfg.bench_key or not hmac.compare_digest(request.query.get("k", ""), cfg.bench_key):
+        return web.Response(status=403)
+    size = min(int(request.query.get("mb", "20")), 45) * 1024 * 1024
+    target = request.query.get("target", "tg")
+    sent = 0
+
+    async def body():
+        nonlocal sent
+        chunk = os.urandom(1 << 20)
+        while sent < size:
+            sent += len(chunk)
+            yield chunk
+
+    session = await bot.tg.session()
+    t0 = time.monotonic()
+    try:
+        if target == "cf":
+            async with session.post("https://speed.cloudflare.com/__up", data=body(),
+                                    headers={"Content-Type": "application/octet-stream"}) as r:
+                status = r.status
+                await r.read()
+        else:
+            form = __import__("aiohttp").FormData()
+            form.add_field("chat_id", "0")
+            form.add_field("document", body(), filename="x.bin", content_type="application/octet-stream")
+            async with session.post(f"{cfg.api_base}/bot{cfg.bot_token}/sendDocument", data=form) as r:
+                status = r.status
+                await r.read()
+    except Exception as e:
+        return web.json_response({"error": f"{type(e).__name__}: {e}"[:200], "sent": sent,
+                                  "secs": round(time.monotonic() - t0, 2)})
+    secs = round(time.monotonic() - t0, 2)
+    return web.json_response({"target": target, "mb": round(sent / 1048576, 1), "secs": secs,
+                              "mb_s": round(sent / 1048576 / max(secs, 0.01), 2), "status": status})
+
+
 WARMUP_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"  # 19 s public clip
 
 
@@ -177,6 +221,7 @@ def make_app(cfg: Config | None = None, tg: Telegram | None = None) -> web.Appli
     app.router.add_post("/webhook", webhook)
     app.router.add_get("/dl/{token}", app[STREAMER].handle)
     app.router.add_get("/bench", bench)
+    app.router.add_get("/netbench", netbench)
 
     async def on_startup(app):
         app[BOT].spawn(set_webhook(app))
