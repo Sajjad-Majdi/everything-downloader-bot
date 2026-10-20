@@ -94,7 +94,8 @@ async def bench(request: web.Request) -> web.Response:
         p.duration = None
         opt.video = {k: v for k, v in opt.video.items() if k not in ("width", "height")}
     try:
-        tm = await bot.run_job(cfg.owner_id, None, p, opt, reuse=reuse, quiet=True)
+        tm = await bot.run_job(cfg.owner_id, None, p, opt, reuse=reuse, quiet=True,
+                               diag={"diskread": request.query.get("diskread") == "1"})
     except Exception as e:
         return web.json_response({"error": f"job: {type(e).__name__}: {e}"[:300], "extract": extract_s}, status=500)
     if tm.get("msg"):
