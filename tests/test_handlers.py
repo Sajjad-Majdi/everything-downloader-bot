@@ -467,3 +467,33 @@ async def test_bench_endpoint(aiohttp_client, monkeypatch):
     assert body["label"] == "360p" and body["reuse"] is True and body["prep"] == 0.5 and body["transfer"] == 1.5
     assert ("delete", {"mid": 2}) in tg.calls          # test message removed at once
     assert tg.uploads[0][3].get("disable_notification") is True
+
+
+async def test_send_video_big_file_bytes_intact(aiohttp_client, tmp_path):
+    import hashlib
+
+    from aiohttp import web
+
+    from dlbot.tg import Telegram
+
+    data = os.urandom(3 * 1024 * 1024 + 12345)
+    src = tmp_path / "v.mp4"
+    src.write_bytes(data)
+    got = {}
+
+    async def send_video(request):
+        form = await request.post()
+        got["sha"] = hashlib.sha256(form["video"].file.read()).hexdigest()
+        return web.json_response({"ok": True, "result": {"message_id": 1}})
+
+    srv = web.Application(client_max_size=10 * 1024 * 1024)
+    srv.router.add_post("/bot1:x/sendVideo", send_video)
+    c = await aiohttp_client(srv)
+    tg = Telegram("1:x", str(c.make_url("")).rstrip("/"))
+    progress = {}
+    try:
+        await tg.send_video(1, str(src), is_file=True, progress=progress)
+    finally:
+        await tg.close()
+    assert got["sha"] == hashlib.sha256(data).hexdigest()
+    assert progress["up"] == progress["up_total"] == len(data)
