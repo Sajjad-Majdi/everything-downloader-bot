@@ -19,7 +19,8 @@
 - Link signing key derives from the token unless `LINK_SECRET` is set.
 
 ## Deploy
-- Repo: github.com/Sajjad-Majdi/everything-downloader-bot (private), branch main. Render auto-deploys on push.
+- Repo: github.com/Sajjad-Majdi/everything-downloader-bot (public), branch main.
+- Render: service `everything-downloader` (srv-dbbkqb67bikc738tbigg), https://everything-downloader-1r7j.onrender.com, Docker, free, Singapore, health /health, same workspace as HadithYab. Deployed from the public repo URL: no auto-deploy; after a push use Manual Deploy > Deploy latest commit.
 - Keep-alive: Cloudflare Worker `downloader-keepalive` (`keepalive/`, cron */13 -> /health), deploy with `wrangler deploy` from `keepalive/`.
 - Update yt-dlp: bump the pin in `requirements.txt`, push (Render rebuilds).
 
