@@ -18,7 +18,8 @@
 ## Speed (measured on Render free, 0.1 CPU, 2026-10-20)
 - Download reuses the menu's extraction (no 2nd yt-dlp run; info kept 20 min, newest 6 only).
 - yt-dlp cache in /tmp + preprocessed-player cache for YouTube JS challenges (deno 11 s -> ~5 s). YouTube extraction still ~8-10 s (deno ~5 s, network ~3 s). Warm-up extraction at boot.
-- Uploads: 1 MiB reads (64 KiB reads were CPU-bound), fresh TCP connection per file, stall watchdog retries (<400 KB/s after 8 s). Root cause of the 11-min case: stuck keep-alive connections to api.telegram.org crawling at ~50 KB/s.
+- Uploads: 1 MiB reads (64 KiB reads were CPU-bound), fresh TCP connection per file, stall watchdog (bytes acked by Telegram, via the kernel send queue) retries below 400 KB/s after 8 s. Root cause of the 11-min case: some connections Singapore -> api.telegram.org crawl at ~50 KB/s (22 MB took 5-9 min, reproduced 3x). BBR is not available on Render (ENOENT).
+- After the fixes: 12:54 YouTube 360p (35 MB) ~10-11 s after the click (+9-10 s extract before the menu); 480p merged 22 MB 10-23 s; 19 s clip ~3 s (+7 s extract); X 360p by URL ~0.6 s (+3.7 s extract); IG 1.7 MB reel 4-25 s (Telegram's own processing after the body varies 1-22 s).
 - `YT_FAST_CLIENT` (JS-less visionos, no cookies) is off: Render IP gets LOGIN_REQUIRED.
 - `/bench?k=BENCH_KEY&url=..&p=360` runs the real pipeline to the owner silently and deletes the message; returns timings. `/netbench?k=..&target=tg|cf` measures egress.
 
