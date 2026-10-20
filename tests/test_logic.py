@@ -149,3 +149,10 @@ def test_ffmpeg_cmd_remux_copy_fragmented():
 def test_safe_name_and_disposition():
     assert safe_name('a/b:c?"d') == "a b c d.mp4"
     assert "filename*=UTF-8''" in disposition("ویدیو.mp4")
+
+
+def test_jsc_preprocessed_player_cache_enabled():
+    from yt_dlp.extractor.youtube.jsc._builtin.ejs import EJSBaseJCP
+
+    from dlbot import ytdl
+    assert ytdl.JSC_CACHE is True and EJSBaseJCP._ENABLE_PREPROCESSED_PLAYER_CACHE is True

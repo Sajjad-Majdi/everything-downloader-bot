@@ -16,6 +16,27 @@ log = logging.getLogger("ytdl")
 CACHE_DIR = os.environ.get("YTDLP_CACHE") or os.path.join(tempfile.gettempdir(), "yt-dlp-cache")
 
 
+def enable_jsc_cache() -> bool:
+    """Cache YouTube's preprocessed player for the JS challenge solver.
+
+    Measured on Render (0.1 CPU): every extraction spent ~11 s in deno re-parsing the full
+    2-3 MB player. yt-dlp ships a preprocessed-player cache but keeps it off (no rotation of
+    old players); one small file in /tmp per player version is fine for us.
+    """
+    if os.environ.get("YT_JSC_CACHE", "1") != "1":
+        return False
+    try:
+        from yt_dlp.extractor.youtube.jsc._builtin.ejs import EJSBaseJCP
+        EJSBaseJCP._ENABLE_PREPROCESSED_PLAYER_CACHE = True
+        return True
+    except Exception as e:  # layout changed in a newer yt-dlp
+        log.warning("could not enable JS challenge cache: %s", e)
+        return False
+
+
+JSC_CACHE = enable_jsc_cache()
+
+
 class TooBig(Exception):
     pass
 
