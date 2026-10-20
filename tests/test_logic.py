@@ -203,3 +203,12 @@ def test_youtube_fast_client_first_then_fallback(monkeypatch):
     _FakeYDL.calls, _FakeYDL.fail_fast = [], False
     monkeypatch.setattr(_FakeYDL, "fast_formats", [{"format_id": "sb", "url": "u", "vcodec": "none"}])
     assert "_fast_client" not in ytdl.extract("https://youtu.be/abc", None)       # no video formats -> fallback
+
+
+def test_audio_prefers_plain_over_drc():
+    info = yt_info()
+    info["formats"].insert(1, {"format_id": "140-drc", "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2",
+                               "abr": 129, "filesize": 10 * MB, "protocol": "https", "format_note": "medium, DRC",
+                               "url": "https://rr1.googlevideo.com/a140drc"})
+    opts = F.build_options(info)
+    assert next(o for o in opts if o.label == "720p").spec == "136+140"
