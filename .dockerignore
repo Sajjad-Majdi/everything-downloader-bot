@@ -1,0 +1,9 @@
+.venv
+.git
+tests
+__pycache__
+*.pyc
+.pytest_cache
+keepalive
+MEMORY.md
+*.env
