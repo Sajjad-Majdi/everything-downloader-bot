@@ -6,11 +6,44 @@ import io
 import json
 import logging
 import os
+import socket
+import struct
 import time
 
 import aiohttp
 
 log = logging.getLogger("tg")
+TCP_CC = os.environ.get("TCP_CC", "bbr").strip()   # congestion control for upload sockets
+_TIOCOUTQ = 0x5411                                 # Linux: bytes not yet acked by the peer
+
+
+def unsent_bytes(sock: socket.socket | None) -> int:
+    """Bytes still in the kernel send queue (Linux); 0 where unsupported."""
+    if sock is None:
+        return 0
+    try:
+        import fcntl
+        return struct.unpack("i", fcntl.ioctl(sock.fileno(), _TIOCOUTQ, bytes(4)))[0]
+    except Exception:
+        return 0
+
+
+def upload_socket(addr_info, holder: dict | None = None) -> socket.socket:
+    """Socket for one upload: tries BBR (copes with loss on long paths far better than cubic)."""
+    family, type_, proto, _, _ = addr_info
+    sock = socket.socket(family=family, type=type_, proto=proto)
+    cc_opt = getattr(socket, "TCP_CONGESTION", None)
+    if TCP_CC and cc_opt is not None:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, cc_opt, TCP_CC.encode())
+            if holder is not None:
+                holder["cc"] = TCP_CC
+        except OSError as e:
+            if holder is not None:
+                holder["cc"] = f"default ({e.strerror})"
+    if holder is not None:
+        holder["sock"] = sock
+    return sock
 
 
 class CountingReader(io.BufferedReader):
@@ -28,7 +61,7 @@ class CountingReader(io.BufferedReader):
         data = super().read(max(n, 1 << 20) if n and n > 0 else n)
         self._progress["up"] += len(data)
         if not data or self._progress["up"] >= self._progress["up_total"]:
-            self._progress.setdefault("t_up_done", time.monotonic())
+            self._progress.setdefault("t_read_done", time.monotonic())
         return data
 
 
@@ -118,11 +151,14 @@ class Telegram:
             return self._result(method, body)
         last_exc: Exception | None = None
         for attempt in range(1, self.ATTEMPTS + 1):
-            progress.pop("t_up_done", None)
+            for k in ("t_up_done", "t_read_done"):
+                progress.pop(k, None)
             progress["attempts"] = attempt
             handles = []
+            holder: dict = {}
             session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(force_close=True),
+                connector=aiohttp.TCPConnector(force_close=True,
+                                               socket_factory=lambda ai: upload_socket(ai, holder)),
                 timeout=aiohttp.ClientTimeout(total=None, sock_connect=20, sock_read=300))
             try:
                 form = self._form(chat_id, video, True, caption, thumb, progress, field, extra, handles)
@@ -132,7 +168,8 @@ class Telegram:
                         return await r.json(content_type=None)
 
                 task = asyncio.ensure_future(post())
-                stalled = await self._watch(task, progress)
+                stalled = await self._watch(task, progress, holder)
+                progress["cc"] = holder.get("cc")
                 if not stalled:
                     return self._result(method, await task)
                 log.warning("upload stalled at %s/%s bytes (attempt %d); retrying on a new connection",
@@ -144,15 +181,23 @@ class Telegram:
                 await session.close()
         raise last_exc or TgError(method, "upload failed")
 
-    async def _watch(self, task: asyncio.Future, progress: dict) -> bool:
-        """Wait for the upload; return True (and cancel it) if the body stalls."""
+    async def _watch(self, task: asyncio.Future, progress: dict, holder: dict | None = None) -> bool:
+        """Wait for the upload; return True (and cancel it) if the body stalls.
+
+        Progress is what the peer really took (bytes read minus the kernel's unsent queue),
+        so a small file sitting in the socket buffer still counts as stuck.
+        """
         t0 = time.monotonic()
         samples = [(t0, 0)]
+        sock = (holder or {}).get
         while not task.done():
             await asyncio.wait({task}, timeout=1.0)
+            unsent = unsent_bytes(sock("sock")) if holder is not None else 0
+            if progress.get("t_read_done") and unsent == 0:
+                progress.setdefault("t_up_done", time.monotonic())
             if task.done() or progress.get("t_up_done"):
                 break
-            now, up = time.monotonic(), progress.get("up", 0)
+            now, up = time.monotonic(), max(0, progress.get("up", 0) - unsent)
             samples.append((now, up))
             samples = [x for x in samples if now - x[0] <= self.WINDOW + 1.0]
             if now - t0 >= self.STALL_AFTER and now - samples[0][0] >= self.WINDOW - 0.5:
