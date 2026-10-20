@@ -61,6 +61,14 @@ def option_rows(rid: str, options: list[Option]) -> list[list[tuple[str, str]]]:
     return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
 
 
+def _time_read(path: str) -> float:
+    t = time.monotonic()
+    with open(path, "rb") as fh:
+        while fh.read(1 << 20):
+            pass
+    return round(time.monotonic() - t, 2)
+
+
 def dl_timings(progress: dict) -> dict:
     """prep = yt-dlp work before the first byte, transfer = bytes on the wire, merge = ffmpeg."""
     s0 = progress.get("t_start")
@@ -232,7 +240,7 @@ class Bot:
             await self.tg.delete(chat, mid)
 
     async def run_job(self, chat: int, mid: int | None, p: Pending, opt: Option, reuse: bool = True,
-                      quiet: bool = False) -> dict:
+                      quiet: bool = False, diag: dict | None = None) -> dict:
         """Send one video. Returns timings; {"link": mode} when it must go out as a link instead."""
         t0 = time.monotonic()
         tm: dict = {"spec": opt.spec, "size": opt.size}
@@ -296,6 +304,8 @@ class Bot:
                 finally:
                     tm.update(dl_timings(progress))
                 thumb = await self._thumb(thumb_task, tm)
+                if diag and diag.get("diskread"):
+                    tm["disk_read"] = await asyncio.to_thread(_time_read, path)
                 progress["phase"] = "up"
                 t1 = time.monotonic()
                 res = await self.tg.send_video(chat, path, is_file=True, caption=caption, thumb=thumb,
