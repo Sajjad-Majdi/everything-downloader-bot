@@ -88,6 +88,11 @@ async def bench(request: web.Request) -> web.Response:
     opt = next((o for o in opts if want and o.label.startswith(want)), None) or auto_option(opts)
     p = Pending(info.get("webpage_url") or url, info.get("title") or "", info.get("duration"), opts,
                 index=index, info=info)
+    if request.query.get("nothumb") == "1":
+        p.info = dict(p.info, thumbnails=[], thumbnail=None, extractor_key="x")
+    if request.query.get("nometa") == "1":
+        p.duration = None
+        opt.video = {k: v for k, v in opt.video.items() if k not in ("width", "height")}
     try:
         tm = await bot.run_job(cfg.owner_id, None, p, opt, reuse=reuse, quiet=True)
     except Exception as e:
