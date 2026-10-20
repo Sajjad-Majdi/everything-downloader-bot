@@ -95,7 +95,9 @@ class DebugLog:
 
 YT_RE = re.compile(r"^https?://([\w-]+\.)?(youtube\.com|youtu\.be|youtube-nocookie\.com)/", re.I)
 # A YouTube client that needs no JS player (no deno run) and no cookies; tried first.
-FAST_CLIENT = os.environ.get("YT_FAST_CLIENT", "visionos").strip()
+# Off by default: on Render's IP visionos answers LOGIN_REQUIRED without cookies (measured
+# 2026-10-20), so the try only cost ~1.7 s. Set YT_FAST_CLIENT=visionos on a host where it works.
+FAST_CLIENT = os.environ.get("YT_FAST_CLIENT", "").strip()
 
 
 def _usable(info: dict) -> bool:

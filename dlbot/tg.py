@@ -21,7 +21,9 @@ class CountingReader(io.BufferedReader):
         progress["up_total"] = os.path.getsize(path)
 
     def read(self, n=-1):
-        data = super().read(n)
+        # aiohttp asks for 64 KiB per executor hop; 1 MiB means ~16x fewer hops, which
+        # matters on a 0.1 CPU host. aiohttp slices oversize chunks safely.
+        data = super().read(max(n, 1 << 20) if n and n > 0 else n)
         self._progress["up"] += len(data)
         return data
 
