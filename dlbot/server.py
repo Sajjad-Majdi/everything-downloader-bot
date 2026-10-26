@@ -11,8 +11,8 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
-from . import warp, ytdl
-from .bot import Bot, Pending, auto_option
+from . import jsc, warp, ytdl
+from .bot import Bot, Pending, auto_option, is_quick, quick_option
 from .formats import build_options, entries_of
 from .config import Config
 from .stream import Streamer
@@ -50,7 +50,7 @@ async def health(request: web.Request) -> web.Response:
                               "token": bool(request.app[CFG].bot_token), "up": int(time.monotonic() - STARTED),
                               "tasks": len(bot.tasks), "streams": request.app[STREAMER].active,
                               "webhook_ok": request.app[STATE].get("webhook_ok"),
-                              "warp": warp.state["ready"], "warp_error": warp.state["error"]})
+                              "warp": warp.state["ready"], "warp_error": warp.state["error"], "jsc": jsc.stats})
 
 
 async def logs(request: web.Request) -> web.Response:
@@ -99,6 +99,9 @@ async def bench(request: web.Request) -> web.Response:
         extra["extractor_args"] = {"youtube": {"player_client": request.query["pc"].split(",")}}
     if request.query.get("warp") == "0":   # compare with the direct (blocked) route
         extra["proxy"] = ""
+    if request.query.get("xa"):   # raw YouTube extractor args for experiments, JSON
+        import json
+        extra.setdefault("extractor_args", {}).setdefault("youtube", {}).update(json.loads(request.query["xa"]))
     if request.query.get("dbg") == "1":
         dbg = ytdl.DebugLog()
         extra |= {"logger": dbg, "verbose": True, "quiet": False}
@@ -114,7 +117,8 @@ async def bench(request: web.Request) -> web.Response:
     extract_s = round(time.monotonic() - t0, 2)
     if request.query.get("only") == "extract":
         out = {"extract": extract_s, "formats": len(info.get("formats") or []),
-               "client": info.get("_fast_client") or "default", "warp": warp.state["ready"] and "proxy" not in extra,
+               "client": info.get("_fast_client") or info.get("_clients") or "default",
+               "warp": warp.state["ready"] and "proxy" not in extra, "jsc": dict(jsc.stats),
                "log": dbg.lines[-120:] if dbg else None}
         if request.query.get("fmts") == "1":
             out["list"] = [{k: f.get(k) for k in ("format_id", "ext", "vcodec", "acodec", "width", "height", "tbr",
@@ -123,6 +127,7 @@ async def bench(request: web.Request) -> web.Response:
                            for f in (info.get("formats") or [])]
             out["options"] = [(o.label, o.spec, o.size) for o in build_options(info)]
         return web.json_response(out)
+    await bot.fill_sizes(info)
     index = None
     entries = entries_of(info)
     if entries:
@@ -130,7 +135,10 @@ async def bench(request: web.Request) -> web.Response:
     opts = build_options(info)
     if not opts:
         return web.json_response({"error": "no video formats", "extract": extract_s}, status=422)
-    opt = next((o for o in opts if want and o.label.startswith(want)), None) or auto_option(opts)
+    # same pick as a real message: instant links get quick_option(), menus default to auto_option()
+    quick = is_quick(url, info, opts)
+    opt = next((o for o in opts if want and o.label.startswith(want)), None) or (
+        quick_option(opts) if quick else auto_option(opts))
     if request.query.get("spec"):   # diagnostics: force an exact yt-dlp format spec
         from dataclasses import replace
         opt = replace(opt, spec=request.query["spec"], size=None)
@@ -149,7 +157,8 @@ async def bench(request: web.Request) -> web.Response:
         return web.json_response({"error": f"job: {type(e).__name__}: {e}"[:300], "extract": extract_s}, status=500)
     if tm.get("msg"):
         await bot.tg.delete(cfg.owner_id, tm.pop("msg"))
-    out = {"extract": extract_s, "client": info.get("_fast_client") or "default", "label": opt.label, "options": [o.label for o in opts], **tm}
+    out = {"extract": extract_s, "client": info.get("_fast_client") or info.get("_clients") or "default",
+           "quick": quick, "label": opt.label, "options": [o.label for o in opts], **tm}
     log.info("bench %s", out)
     return web.json_response(out)
 

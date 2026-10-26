@@ -1,0 +1,43 @@
+"""The warm JS challenge solver (one long-lived process instead of a new deno per extraction)."""
+import shutil
+
+import pytest
+
+from dlbot import jsc
+
+pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node not installed (deno runs it on Render)")
+
+PRE = '_result.n = (x) => x.split("").reverse().join(""); _result.sig = (x) => x + "!";'
+LIB = "var lib = {};"
+# Stand-in for yt-dlp's core: preprocesses a raw player into PRE and counts its calls.
+CORE = "var calls = 0; var jsc = function(d) { calls++; return {type: 'result', preprocessed_player: %r, " \
+       "responses: d.requests.map(r => ({type: 'result', data: {calls: calls}}))}; };" % PRE
+
+
+def test_warm_solver_builds_once_then_reuses(tmp_path):
+    s = jsc.WarmSolver(["node"], LIB, CORE, timeout=10)
+    try:
+        out = s.solve({"type": "player", "player": "RAW", "output_preprocessed": True,
+                       "requests": [{"type": "n", "challenges": ["x"]}]})
+        assert out["preprocessed_player"] == PRE and out["responses"][0]["data"] == {"calls": 1}
+        req = {"type": "preprocessed", "preprocessed_player": PRE,
+               "requests": [{"type": "n", "challenges": ["abc", "xy"]}, {"type": "sig", "challenges": ["s"]}]}
+        out = s.solve(dict(req))
+        assert out["responses"][0]["data"] == {"abc": "cba", "xy": "yx"}
+        assert out["responses"][1]["data"] == {"s": "s!"}
+        pid = s.proc.pid
+        out = s.solve(dict(req))                       # cached: the player text is not sent again
+        assert out["responses"][0]["data"]["abc"] == "cba" and s.proc.pid == pid
+        s.proc.kill()                                  # process died: started again, rebuilt
+        s.proc.wait()
+        out = s.solve(dict(req))
+        assert out["responses"][1]["data"] == {"s": "s!"} and s.proc.pid != pid
+    finally:
+        s.close()
+
+
+def test_install_patches_deno_provider_once():
+    from yt_dlp.extractor.youtube.jsc._builtin.deno import DenoJCP
+    assert jsc.install() is True and DenoJCP._dl_warm is True
+    run = DenoJCP._run_js_runtime
+    assert jsc.install() is True and DenoJCP._run_js_runtime is run

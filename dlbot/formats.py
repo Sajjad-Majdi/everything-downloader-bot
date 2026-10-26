@@ -124,7 +124,9 @@ def build_options(info: dict) -> list[Option]:
         groups.setdefault(bucket(p_of(f)), []).append(f)
     options: list[Option] = []
     for b in sorted(groups):
-        pick = max(groups[b], key=lambda f: (codec_score(f), has_audio(f), proto_score(f), f.get("tbr") or 0,
+        # plain https before HLS/DASH manifests (YouTube's muxed HLS 720p is huge and slow to fetch),
+        # then a file that already has audio (no merge), then bitrate/size
+        pick = max(groups[b], key=lambda f: (codec_score(f), proto_score(f), has_audio(f), f.get("tbr") or 0,
                                              f.get("filesize") or 0))
         options.append(_make(f"{b}p" if b else "ویدیو", pick, audio, duration))
     options = options[-MAX_OPTIONS:]

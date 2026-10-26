@@ -10,7 +10,7 @@ import time
 
 from yt_dlp import YoutubeDL
 
-from . import warp
+from . import jsc, warp
 from .config import TG_UPLOAD_LIMIT
 
 log = logging.getLogger("ytdl")
@@ -37,6 +37,7 @@ def enable_jsc_cache() -> bool:
 
 
 JSC_CACHE = enable_jsc_cache()
+JSC_WARM = jsc.install()   # one long-lived deno instead of a new one per extraction
 
 
 class TooBig(Exception):
@@ -103,6 +104,9 @@ YT_RE = re.compile(r"^https?://([\w-]+\.)?(youtube\.com|youtu\.be|youtube-nocook
 # Off by default: on Render's IP visionos answers LOGIN_REQUIRED without cookies (measured
 # 2026-10-20), so the try only cost ~1.7 s. Set YT_FAST_CLIENT=visionos on a host where it works.
 FAST_CLIENT = os.environ.get("YT_FAST_CLIENT", "").strip()
+# yt-dlp asks three YouTube clients when logged in (web_embedded, tv_samsung, web); measured through
+# WARP 2026-10-26, tv_samsung alone gives every DASH format ~1 s sooner. Falls back to the defaults.
+YT_CLIENTS = os.environ.get("YT_CLIENTS", "tv_samsung").strip()
 
 
 def _usable(info: dict) -> bool:
@@ -125,6 +129,19 @@ def extract(url: str, cookie_file: str | None = None, extra: dict | None = None,
             log.info("fast client gave no usable formats; full extraction")
         except Exception as e:
             log.info("fast client failed (%s); full extraction", str(e)[:120])
+    if (YT_CLIENTS and cookie_file and YT_RE.match(url) and "extractor_args" not in extra
+            and "list=" not in url and "/playlist" not in url):
+        opts = base_opts(cookie_file, url) | extra | {
+            "extractor_args": {"youtube": {"player_client": YT_CLIENTS.split(",")}}}
+        try:
+            with YoutubeDL(opts) as ydl:
+                info = ydl.sanitize_info(ydl.extract_info(url, download=False))
+            if _usable(info):
+                info["_clients"] = YT_CLIENTS
+                return info
+            log.info("clients %s gave no usable formats; default clients", YT_CLIENTS)
+        except Exception as e:
+            log.info("clients %s failed (%s); default clients", YT_CLIENTS, str(e)[:120])
     with YoutubeDL(base_opts(cookie_file, url) | extra) as ydl:
         info = ydl.extract_info(url, download=False)
         return ydl.sanitize_info(info)

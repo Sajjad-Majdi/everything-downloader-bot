@@ -205,6 +205,7 @@ def test_youtube_fast_client_first_then_fallback(monkeypatch):
     from dlbot import ytdl
     monkeypatch.setattr(ytdl, "YoutubeDL", _FakeYDL)
     monkeypatch.setattr(ytdl, "FAST_CLIENT", "visionos")
+    monkeypatch.setattr(ytdl, "YT_CLIENTS", "")
     _FakeYDL.calls, _FakeYDL.fail_fast = [], False
     info = ytdl.extract("https://youtu.be/abc", "/tmp/cookies.txt")
     assert info["_fast_client"] == "visionos" and _FakeYDL.calls == [(["visionos"], None)]   # no cookies, one call
@@ -219,6 +220,34 @@ def test_youtube_fast_client_first_then_fallback(monkeypatch):
     _FakeYDL.calls, _FakeYDL.fail_fast = [], False
     monkeypatch.setattr(_FakeYDL, "fast_formats", [{"format_id": "sb", "url": "u", "vcodec": "none"}])
     assert "_fast_client" not in ytdl.extract("https://youtu.be/abc", None)       # no video formats -> fallback
+
+
+def test_youtube_single_client_with_cookies_then_default(monkeypatch):
+    from dlbot import ytdl
+    monkeypatch.setattr(ytdl, "YoutubeDL", _FakeYDL)
+    monkeypatch.setattr(ytdl, "FAST_CLIENT", "")
+    monkeypatch.setattr(ytdl, "YT_CLIENTS", "tv_samsung")
+    monkeypatch.setattr(_FakeYDL, "fast_formats", [{"format_id": "18", "url": "https://rr.googlevideo.com/x",
+                                                    "vcodec": "avc1"}])
+    _FakeYDL.calls, _FakeYDL.fail_fast = [], False
+    info = ytdl.extract("https://youtu.be/abc", "/tmp/c.txt")
+    assert info["_clients"] == "tv_samsung" and _FakeYDL.calls == [(["tv_samsung"], "/tmp/c.txt")]
+    _FakeYDL.calls, _FakeYDL.fail_fast = [], True          # client broke: yt-dlp's own defaults
+    info = ytdl.extract("https://youtu.be/abc", "/tmp/c.txt")
+    assert "_clients" not in info and _FakeYDL.calls == [(["tv_samsung"], "/tmp/c.txt"), (None, "/tmp/c.txt")]
+    _FakeYDL.calls = []
+    ytdl.extract("https://youtu.be/abc", None)             # no cookies: defaults only
+    ytdl.extract("https://www.instagram.com/reel/x/", "/tmp/c.txt")
+    assert [c[0] for c in _FakeYDL.calls] == [None, None]
+
+
+def test_youtube_https_dash_beats_muxed_hls():
+    info = yt_info()
+    info["formats"].append({"format_id": "300", "ext": "mp4", "vcodec": "avc1.4d401f", "acodec": "mp4a.40.2",
+                            "width": 1280, "height": 720, "tbr": 4000, "protocol": "m3u8_native",
+                            "url": "https://manifest.googlevideo.com/hls"})
+    o = next(o for o in F.build_options(info) if o.label == "720p")
+    assert o.spec == "136+140"
 
 
 def test_audio_prefers_plain_over_drc():
