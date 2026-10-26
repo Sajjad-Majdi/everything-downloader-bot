@@ -2,9 +2,11 @@
 
 Measured on Render free (0.1 CPU, 2026-10-26): every YouTube extraction started a new deno
 process that parsed the ~150 KB solver library and evaluated the whole preprocessed player,
-about 4.8 s of an 7-8 s extraction. This module keeps one deno process alive: the library is
-parsed once and the solver functions of each player version are built once and cached, so
-later links only run the tiny n/sig functions.
+about 4.8 s of an 7-8 s extraction. This module keeps one small deno process alive that only
+evaluates the PREPROCESSED player (once per player version) and then runs the tiny n/sig
+functions. Preprocessing a raw player (a big AST job, the first time a player version is seen)
+still runs in yt-dlp's normal one-shot deno, which exits and frees its memory: a warm process
+that also did that held 312 MB and pushed the 512 MB container into OOM kills.
 
 It plugs into yt-dlp's own deno provider (DenoJCP): `_construct_stdin` still builds the same
 request, `_run_js_runtime` sends it to the warm process instead of a new one. Any failure
@@ -23,7 +25,8 @@ import threading
 log = logging.getLogger("jsc")
 
 # Reads one JSON request per line on stdin, answers one JSON line per request on stdout.
-# Works in deno and node. `jsc` and `lib` come from yt-dlp's own solver scripts (prepended).
+# Works in deno and node. Needs no solver library: it only evaluates preprocessed players.
+WARM_MAX_RSS_MB = int(os.environ.get("JSC_WARM_MAX_RSS_MB", "160"))   # recycle the process above this
 SERVER_JS = r"""
 const cache = new Map();          // player key -> {n, sig} solver functions
 const MAX_PLAYERS = 4;
@@ -52,9 +55,7 @@ function handle(msg) {
     if (!s) { s = solverFrom(d.preprocessed_player); remember(msg.key, s); }
     return {type: "result", responses: solveWith(s, d.requests)};
   }
-  const out = jsc(d);                // raw player: the library preprocesses it once
-  if (out.type === "result" && out.preprocessed_player) remember(msg.key, solverFrom(out.preprocessed_player));
-  return out;
+  return {type: "error", error: "raw players are preprocessed by the one-shot run"};
 }
 function reply(id, obj) {
   const line = JSON.stringify({id, out: obj}) + "\n";
@@ -90,12 +91,13 @@ main();
 class WarmSolver:
     """One persistent JS process; thread-safe (calls are serialized)."""
 
-    def __init__(self, cmd: list[str], lib_code: str, core_code: str, timeout: float = 30.0):
+    def __init__(self, cmd: list[str], timeout: float = 30.0, max_rss_mb: int = WARM_MAX_RSS_MB):
         self.cmd = cmd
         self.timeout = timeout
+        self.max_rss_mb = max_rss_mb
         fd, self.script = tempfile.mkstemp(prefix="jsc-server-", suffix=".js")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(lib_code + "\nObject.assign(globalThis, lib);\n" + core_code + "\n" + SERVER_JS)
+            fh.write(SERVER_JS)
         self.lock = threading.Lock()
         self.proc: subprocess.Popen | None = None
         self.known: set[str] = set()     # player keys the process has built solvers for
@@ -132,20 +134,35 @@ class WarmSolver:
             raise RuntimeError("warm solver answered out of order")
         return ans["out"]
 
+    def rss_mb(self) -> int | None:
+        try:
+            with open(f"/proc/{self.proc.pid}/status") as fh:
+                return next(int(ln.split()[1]) // 1024 for ln in fh if ln.startswith("VmRSS:"))
+        except Exception:
+            return None
+
     def solve(self, data: dict) -> dict:
-        """`data` is the dict yt-dlp hands to jsc(); returns jsc()'s output dict."""
-        player = data.get("preprocessed_player") if data.get("type") == "preprocessed" else data.get("player")
-        key = hashlib.sha1((player or "").encode()).hexdigest()
+        """`data` (type "preprocessed") is the dict yt-dlp hands to jsc(); returns jsc()'s output dict."""
+        if data.get("type") != "preprocessed":
+            raise ValueError("warm solver only takes preprocessed players")
+        key = hashlib.sha1((data.get("preprocessed_player") or "").encode()).hexdigest()
         with self.lock:
             self._ensure()
-            if data.get("type") == "preprocessed" and key in self.known:
-                out = self._ask({"key": key, "data": {"type": "cached", "requests": data["requests"]}})
-                if out.get("type") != "miss":
-                    return out
-            out = self._ask({"key": key, "data": data})
-            if out.get("type") == "result":
-                self.known.add(key)
-            return out
+            try:
+                if key in self.known:
+                    out = self._ask({"key": key, "data": {"type": "cached", "requests": data["requests"]}})
+                    if out.get("type") != "miss":
+                        return out
+                out = self._ask({"key": key, "data": data})
+                if out.get("type") == "result":
+                    self.known.add(key)
+                return out
+            finally:
+                rss = self.rss_mb() if self.proc else None
+                stats["rss_mb"] = rss
+                if rss and rss > self.max_rss_mb:   # keep the 512 MB container safe
+                    log.info("warm solver at %d MB, recycling it", rss)
+                    self.close()
 
     def close(self):
         if self.proc is not None:
@@ -159,7 +176,7 @@ class WarmSolver:
 
 _solver: WarmSolver | None = None
 _solver_lock = threading.Lock()
-stats = {"warm": 0, "fallback": 0, "error": None}
+stats = {"warm": 0, "oneshot": 0, "fallback": 0, "error": None, "rss_mb": None}
 
 
 def install() -> bool:
@@ -188,13 +205,17 @@ def install() -> bool:
         global _solver
         data = getattr(self, "_dl_data", None)
         self._dl_data = None
-        if data is not None and self._lib_script.variant != ScriptVariant.DENO_NPM:
+        if data is not None and data.get("type") != "preprocessed":
+            stats["oneshot"] += 1     # first sight of a player version: heavy preprocessing, one-shot deno
+            with _solver_lock:        # the old player's solver is useless now; free its RAM before the big run
+                if _solver is not None:
+                    _solver.close()
+        elif data is not None and self._lib_script.variant != ScriptVariant.DENO_NPM:
             try:
                 with _solver_lock:
                     if _solver is None:
                         _solver = WarmSolver([self.runtime_info.path, "run", "--no-prompt", "--no-remote", "--no-npm",
-                                              "--no-config", "--no-lock", "--node-modules-dir=none", "--no-code-cache"],
-                                             self._lib_script.code, self._core_script.code)
+                                              "--no-config", "--no-lock", "--node-modules-dir=none", "--no-code-cache"])
                 out = _solver.solve(data)
                 stats["warm"] += 1
                 return json.dumps(out)

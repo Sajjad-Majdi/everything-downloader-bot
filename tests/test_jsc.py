@@ -8,18 +8,13 @@ from dlbot import jsc
 pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node not installed (deno runs it on Render)")
 
 PRE = '_result.n = (x) => x.split("").reverse().join(""); _result.sig = (x) => x + "!";'
-LIB = "var lib = {};"
-# Stand-in for yt-dlp's core: preprocesses a raw player into PRE and counts its calls.
-CORE = "var calls = 0; var jsc = function(d) { calls++; return {type: 'result', preprocessed_player: %r, " \
-       "responses: d.requests.map(r => ({type: 'result', data: {calls: calls}}))}; };" % PRE
 
 
 def test_warm_solver_builds_once_then_reuses(tmp_path):
-    s = jsc.WarmSolver(["node"], LIB, CORE, timeout=10)
+    s = jsc.WarmSolver(["node"], timeout=10)
     try:
-        out = s.solve({"type": "player", "player": "RAW", "output_preprocessed": True,
-                       "requests": [{"type": "n", "challenges": ["x"]}]})
-        assert out["preprocessed_player"] == PRE and out["responses"][0]["data"] == {"calls": 1}
+        with pytest.raises(ValueError):                 # raw players go to the one-shot run
+            s.solve({"type": "player", "player": "RAW", "requests": []})
         req = {"type": "preprocessed", "preprocessed_player": PRE,
                "requests": [{"type": "n", "challenges": ["abc", "xy"]}, {"type": "sig", "challenges": ["s"]}]}
         out = s.solve(dict(req))
