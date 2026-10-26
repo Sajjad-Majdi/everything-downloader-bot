@@ -482,7 +482,7 @@ class Bot:
             text, url = T.too_big_direct(size_txt), direct_url(opt)
         else:
             if not self.cfg.public_url:
-                await self.tg.edit(chat, mid, "آدرس عمومی سرور (PUBLIC_URL) تنظیم نشده.")
+                await self.tg.edit(chat, mid, "آدرس عمومی سرور (PUBLIC_URL) تنظیم نشده است.")
                 return
             token = sign(self.cfg.link_key, {"u": p.url, "f": opt.spec, "i": p.index, "t": p.title[:60]}, LINK_TTL)
             url = f"{self.cfg.public_url}/dl/{token}"

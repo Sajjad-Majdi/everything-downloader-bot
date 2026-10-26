@@ -100,9 +100,9 @@ class Streamer:
         except BadToken as e:
             status = 410 if "expired" in str(e) else 403
             return web.Response(status=status, text="This link has expired or is invalid. Ask the bot for a new one.\n"
-                                                    "لینک منقضی یا نامعتبره؛ از ربات یه لینک تازه بگیر.")
+                                                    "لینک منقضی یا نامعتبر است. لینک تازه‌ای از ربات بگیرید.")
         if self.active >= self.cfg.max_streams:
-            return web.Response(status=429, text="Busy, try again in a minute.\nسرور سرش شلوغه؛ یه دقیقه دیگه امتحان کن.")
+            return web.Response(status=429, text="Busy, try again in a minute.\nسرور مشغول است. یک دقیقه بعد دوباره تلاش کنید.")
         self.active += 1
         try:
             info = self.resolved.get(token)
@@ -119,7 +119,7 @@ class Streamer:
             raise
         except Exception as e:
             log.exception("stream failed")
-            return web.Response(status=502, text=f"Source failed: {type(e).__name__}\nمنبع جواب نداد؛ دوباره امتحان کن.")
+            return web.Response(status=502, text=f"Source failed: {type(e).__name__}\nمنبع پاسخ نداد. دوباره تلاش کنید.")
         finally:
             self.active -= 1
 
@@ -239,7 +239,7 @@ class Streamer:
             if not first:
                 err = (await proc.stderr.read())[-300:].decode(errors="replace")
                 log.warning("ffmpeg produced nothing: %s", err)
-                return web.Response(status=502, text="Remux failed.\nنشد ویدیو رو آماده کنم.")
+                return web.Response(status=502, text="Remux failed.\nآماده‌سازی ویدیو ناموفق بود.")
             await resp.prepare(request)
             await resp.write(first)
             while True:

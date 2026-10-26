@@ -1,4 +1,8 @@
-"""Persian UI text (short, colloquial) and small formatters."""
+"""Persian UI text and small formatters.
+
+Short, standard written Persian, no chatty first person («در حال دانلود ویدیو…», not «دارم برات
+دانلودش می‌کنم»): it is a downloader bot, not an assistant (Sajjad, 2026-10-26).
+"""
 from __future__ import annotations
 
 FA_DIGITS = str.maketrans("0123456789.", "۰۱۲۳۴۵۶۷۸۹٫")
@@ -13,11 +17,11 @@ def human_size(n: int | None, approx: bool = False) -> str:
         return "حجم نامعلوم"
     mb = n / (1024 * 1024)
     if mb >= 1024:
-        s = f"{mb / 1024:.1f} گیگ"
+        s = f"{mb / 1024:.1f} گیگابایت"
     elif mb >= 10:
-        s = f"{mb:.0f} مگ"
+        s = f"{mb:.0f} مگابایت"
     else:
-        s = f"{mb:.1f} مگ"
+        s = f"{mb:.1f} مگابایت"
     return fa(("~" if approx else "") + s)
 
 
@@ -31,65 +35,64 @@ def human_duration(sec) -> str:
 
 
 START = (
-    "سلام! لینک ویدیو رو از یوتیوب، اینستاگرام، ایکس (توییتر) یا هر سایت دیگه‌ای بفرست.\n"
-    "کیفیت رو انتخاب کن، بقیه‌ش با من."
+    "لینک ویدیو را از یوتیوب، اینستاگرام، ایکس (توییتر) یا سایت‌های دیگر ارسال کنید.\n"
+    "پس از انتخاب کیفیت، ویدیو ارسال می‌شود."
 )
-NOT_ALLOWED = "ببخشید، این ربات شخصیه و فقط برای صاحبش کار می‌کنه."
-NO_LINK = "یه لینک ویدیو بفرست تا برات بگیرمش."
-CHECKING = "دارم لینک رو نگاه می‌کنم…"
-CHOOSE = "کیفیت رو انتخاب کن:"
-NO_VIDEO = "توی این لینک ویدیویی پیدا نکردم."
-QUEUED = "یه کار دیگه دستمه؛ نوبتت که شد شروع می‌کنم…"
-PREPARING = "دارم آماده‌ش می‌کنم…"
-UPLOADING = "دارم برات می‌فرستمش…"
-EXPIRED = "این دکمه قدیمی شده؛ لینک رو دوباره بفرست."
-DONE_CACHED = "اینو قبلاً گرفته بودم، بفرما."
+NOT_ALLOWED = "این ربات خصوصی است و فقط برای مالک آن فعال است."
+NO_LINK = "لطفاً لینک یک ویدیو را ارسال کنید."
+CHECKING = "در حال بررسی لینک…"
+CHOOSE = "کیفیت را انتخاب کنید:"
+NO_VIDEO = "در این لینک ویدیویی یافت نشد."
+QUEUED = "در صف انتظار…"
+PREPARING = "در حال آماده‌سازی…"
+UPLOADING = "در حال ارسال ویدیو…"
+EXPIRED = "این دکمه منقضی شده است. لینک را دوباره ارسال کنید."
 BUTTON_DL = "دانلود مستقیم"
-PLAYLIST = "این یه پلی‌لیسته ({n} تا ویدیو). کدومش رو می‌خوای؟"
-CAROUSEL = "این پست {n} تا ویدیو داره. کدومش رو می‌خوای؟"
-ALL_ITEMS = "همه‌شون"
+PLAYLIST = "این لینک یک فهرست پخش با {n} ویدیو است. ویدیوی موردنظر را انتخاب کنید:"
+CAROUSEL = "این پست {n} ویدیو دارد. ویدیوی موردنظر را انتخاب کنید:"
+ALL_ITEMS = "همه‌ی ویدیوها"
 ITEM = "ویدیوی {i}"
 
 
 def downloading(pct: float | None, total: int | None) -> str:
     if pct is None:
-        return "دارم دانلود می‌کنم…"
+        return "در حال دانلود ویدیو…"
     tail = f" از {human_size(total)}" if total else ""
-    return fa(f"دارم دانلود می‌کنم… {pct:.0f}٪") + tail
+    return fa(f"در حال دانلود ویدیو… {pct:.0f}٪") + tail
 
 
 def uploading(pct: float | None) -> str:
     if pct is None:
         return UPLOADING
-    return fa(f"دارم برات می‌فرستمش… {pct:.0f}٪")
+    return fa(f"در حال ارسال ویدیو… {pct:.0f}٪")
 
 
 def too_big_stream(size_txt: str) -> str:
     return (
-        f"حجمش ({size_txt}) از سقف ۵۰ مگ تلگرام بیشتره.\n"
-        "از این لینک مستقیم بگیرش؛ تا یه ساعت کار می‌کنه:"
+        f"حجم ویدیو ({size_txt}) از سقف ۵۰ مگابایتی تلگرام بیشتر است.\n"
+        "لینک دانلود مستقیم (معتبر تا یک ساعت):"
     )
 
 
 def too_big_direct(size_txt: str) -> str:
     return (
-        f"حجمش ({size_txt}) از سقف ۵۰ مگ تلگرام بیشتره.\n"
-        "این لینک مستقیم خود سایته؛ چند ساعت بعد ممکنه باطل بشه:"
+        f"حجم ویدیو ({size_txt}) از سقف ۵۰ مگابایتی تلگرام بیشتر است.\n"
+        "لینک مستقیم سایت (ممکن است پس از چند ساعت منقضی شود):"
     )
 
 
 def error_text(exc: BaseException) -> str:
     msg = str(exc).lower()
     if "confirm you" in msg and "bot" in msg:
-        return "یوتیوب گیر داده که «ربات نیستی». باید کوکی یوتیوب بدی (COOKIES_B64)."
+        return "یوتیوب درخواست را به‌عنوان ربات رد کرد. کوکی یوتیوب (COOKIES_B64) لازم است."
     if "private" in msg or "login" in msg or "log in" in msg or "sign in" in msg:
-        return "این ویدیو خصوصیه یا لاگین می‌خواد. با کوکی (COOKIES_B64) درست می‌شه."
+        return "این ویدیو خصوصی است یا ورود به حساب لازم دارد. کوکی (COOKIES_B64) لازم است."
     if "unsupported url" in msg:
-        return "این لینک رو نمی‌شناسم؛ مطمئنی لینک ویدیوئه؟"
+        return "این لینک پشتیبانی نمی‌شود."
     if "not available" in msg or "unavailable" in msg or "removed" in msg or "404" in msg:
-        return "این ویدیو در دسترس نیست؛ شاید پاک شده."
+        return "این ویدیو در دسترس نیست؛ ممکن است حذف شده باشد."
     if "geo" in msg or "country" in msg:
-        return "این ویدیو برای سرور من در دسترس نیست (محدودیت کشوری)."
+        return "این ویدیو در کشور سرور در دسترس نیست."
     if "timed out" in msg or "timeout" in msg:
-        return "سایت جواب نداد؛ یه بار دیگه امتحان کن."
-    return "نشد بگیرمش. یه بار دیگه امتحان کن؛ اگه باز نشد، لینک دیگه‌ای بفرست."
+        return "سایت پاسخ نداد. دوباره تلاش کنید."
+    return "دریافت ویدیو ناموفق بود. دوباره تلاش کنید یا لینک دیگری ارسال کنید."

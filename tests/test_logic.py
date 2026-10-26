@@ -147,8 +147,8 @@ def test_config_derives_secrets_and_ids():
 
 
 def test_persian_formatting():
-    assert texts.human_size(5 * MB) == "۵٫۰ مگ"
-    assert texts.human_size(70 * MB, True) == "~۷۰ مگ"
+    assert texts.human_size(5 * MB) == "۵٫۰ مگابایت"
+    assert texts.human_size(70 * MB, True) == "~۷۰ مگابایت"
     assert texts.human_size(None) == "حجم نامعلوم"
     assert texts.human_duration(3725) == "۱:۰۲:۰۵"
     assert texts.human_duration(65) == "۱:۰۵"
@@ -288,3 +288,18 @@ def test_probed_instagram_progressive_wins_its_height_and_one_height_sends_at_on
     opts = F.build_options(info)
     assert opts[0].spec == "1" and opts[0].label == "720p"     # H.264 progressive, not the VP9 DASH part
     assert is_quick(opts) and quick_option(opts).spec == "1"
+
+
+def test_ui_texts_are_written_persian_not_chatty():
+    """Bot text is short standard written Persian, never colloquial first person (Sajjad, 2026-10-26)."""
+    import re
+    strings = [v for k, v in vars(texts).items() if k.isupper() and isinstance(v, str)]
+    strings += [texts.downloading(40, 10 * MB), texts.downloading(None, None), texts.uploading(40),
+                texts.too_big_stream("۶۰ مگابایت"), texts.too_big_direct("۶۰ مگابایت")]
+    strings += [texts.error_text(Exception(m)) for m in ("Sign in to confirm you're not a bot", "Private video",
+                                                         "Unsupported URL", "Video unavailable", "geo blocked",
+                                                         "timed out", "other")]
+    chatty = re.compile(r"دارم|برات|می‌کنم|بفرست|رو انتخاب|نشد بگیرم|یه |کن[.:،؛…]|ه؛|ویژگی")
+    bad = [t for t in strings if chatty.search(t)]
+    assert not bad, bad
+    assert texts.CHOOSE == "کیفیت را انتخاب کنید:" and texts.CHECKING == "در حال بررسی لینک…"
