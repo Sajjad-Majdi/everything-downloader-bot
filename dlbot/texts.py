@@ -49,7 +49,6 @@ PLAYLIST = "این یه پلی‌لیسته ({n} تا ویدیو). کدومش ر
 CAROUSEL = "این پست {n} تا ویدیو داره. کدومش رو می‌خوای؟"
 ALL_ITEMS = "همه‌شون"
 ITEM = "ویدیوی {i}"
-OTHER_QUALITIES = "کیفیت‌های دیگه"
 
 
 def downloading(pct: float | None, total: int | None) -> str:

@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from aiohttp import web
 
 from . import jsc, warp, ytdl
+from . import texts as T
 from .bot import Bot, Pending, auto_option, is_quick, quick_option
 from .formats import build_options, entries_of
 from .config import Config
@@ -171,8 +172,13 @@ async def bench(request: web.Request) -> web.Response:
     opts = build_options(info)
     if not opts:
         return web.json_response({"error": "no video formats", "extract": extract_s}, status=422)
-    # same pick as a real message: instant links get quick_option(), menus default to auto_option()
-    quick = is_quick(url, info, opts)
+    # same as a real message: one quality goes out at once; else the menu (menu_s = time until the
+    # buttons show) and p= plays the tap, auto_option() when p is not given
+    quick = is_quick(opts)
+    menu_s = round(time.monotonic() - t0, 2)
+    if request.query.get("only") == "menu":
+        return web.json_response({"extract": extract_s, "menu": menu_s, "quick": quick,
+                                  "options": [(o.label, T.human_size(o.size, o.approx)) for o in opts]})
     opt = next((o for o in opts if want and o.label.startswith(want)), None) or (
         quick_option(opts) if quick else auto_option(opts))
     if request.query.get("spec"):   # diagnostics: force an exact yt-dlp format spec
@@ -193,7 +199,7 @@ async def bench(request: web.Request) -> web.Response:
         return web.json_response({"error": f"job: {type(e).__name__}: {e}"[:300], "extract": extract_s}, status=500)
     if tm.get("msg"):
         await bot.tg.delete(cfg.owner_id, tm.pop("msg"))
-    out = {"extract": extract_s, "client": info.get("_fast_client") or info.get("_clients") or "default",
+    out = {"extract": extract_s, "menu": menu_s, "client": info.get("_fast_client") or info.get("_clients") or "default",
            "quick": quick, "label": opt.label, "options": [o.label for o in opts], **tm}
     log.info("bench %s", out)
     return web.json_response(out)
