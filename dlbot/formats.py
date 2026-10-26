@@ -155,15 +155,43 @@ def direct_url(opt: Option) -> str | None:
 
 
 def sizeless_direct(info: dict, limit: int = 6) -> list[dict]:
-    """Video formats on open CDNs (Instagram, X) with no size: a HEAD request can tell it."""
+    """Video formats on open CDNs (Instagram, X) with no size or no height (Instagram's progressive
+    files carry neither): the first bytes of the file can tell both."""
     out = []
     for item in (entries_of(info) or [info]):
         for f in _formats(item):
             # only files that already carry audio can be sent by URL; DASH video-only parts are skipped
-            if (not f.get("filesize") and not f.get("filesize_approx") and f.get("url") and is_video(f)
-                    and has_audio(f) and proto_score(f) and is_direct_host(f["url"])):
+            if (((not f.get("filesize") and not f.get("filesize_approx")) or not f.get("height"))
+                    and f.get("url") and is_video(f) and has_audio(f) and proto_score(f) and is_direct_host(f["url"])):
                 out.append(f)
     return out[:limit]
+
+
+def mp4_meta(buf: bytes) -> dict:
+    """Width/height of the first video track and the duration, read from an MP4 header (the moov box
+    sits at the start of Instagram's progressive files). Empty when the header is not in `buf`."""
+    out = {}
+    i = buf.find(b"mvhd")
+    if i >= 4 and len(buf) >= i + 36:
+        p = i + 4
+        if buf[p] == 1:
+            scale, dur = int.from_bytes(buf[p + 20:p + 24], "big"), int.from_bytes(buf[p + 24:p + 32], "big")
+        else:
+            scale, dur = int.from_bytes(buf[p + 12:p + 16], "big"), int.from_bytes(buf[p + 16:p + 20], "big")
+        if scale and dur:
+            out["duration"] = dur / scale
+    i = buf.find(b"tkhd")
+    while i >= 4:   # audio tracks have width 0: take the first track with a picture size
+        p = i + 4
+        off = p + (88 if buf[p] == 1 else 76)
+        if len(buf) < off + 8:
+            break
+        w, h = int.from_bytes(buf[off:off + 4], "big") >> 16, int.from_bytes(buf[off + 4:off + 8], "big") >> 16
+        if 16 <= w <= 8192 and 16 <= h <= 8192:
+            out.update(width=w, height=h)
+            break
+        i = buf.find(b"tkhd", i + 4)
+    return out
 
 
 def plan(opt: Option) -> str:

@@ -16,7 +16,7 @@ from . import texts as T
 from . import ytdl
 from .cache import LRU
 from .config import LINK_TTL, SAFE_UPLOAD_LIMIT, Config
-from .formats import (Option, bucket, build_options, direct_url, entries_of, entry_is_resolved, plan,
+from .formats import (Option, bucket, build_options, direct_url, entries_of, entry_is_resolved, mp4_meta, plan,
                       sizeless_direct)
 from .signing import sign
 from .tg import Telegram, TgError, keyboard
@@ -28,6 +28,7 @@ EDIT_EVERY = 3.0
 INFO_FRESH = 20 * 60      # reuse extracted media URLs for this long, then extract again
 KEEP_INFOS = 6            # info dicts are large; keep only the newest few in RAM
 AUTO_MAX_P = 720          # quality cap for the automatic pick when we must upload the file ourselves
+PROBE_BYTES = 64 * 1024   # MP4 header (size via Content-Range, height and duration via the moov box)
 
 
 @dataclass
@@ -218,26 +219,44 @@ class Bot:
         await self.deliver(chat, mid, p, quick_option(p.options))
 
     async def fill_sizes(self, info: dict):
-        """Instagram/X often give no file size: HEAD the open-CDN formats in parallel (~0.2 s) so the
-        menu shows real sizes and the best progressive file can be picked and sent by URL."""
-        fmts = sizeless_direct(info)
-        session = await self.tg.session() if fmts else None
+        """Instagram/X often give no file size, and Instagram's progressive files no height or duration
+        either (the menu showed «ویدیو» and «حجم نامعلوم»). Read the first 64 KB of each open-CDN file in
+        parallel (~0.3 s): Content-Range gives the size, the MP4 header the height and the duration (which
+        also sizes the DASH options from their bitrate)."""
+        pairs = [(item, f) for item in (entries_of(info) or [info]) for f in sizeless_direct(item)][:6]
+        session = await self.tg.session() if pairs else None
         if session is None:
             return
         t0 = time.monotonic()
 
-        async def one(f):
+        async def one(item, f):
             try:
-                async with session.head(f["url"], headers=f.get("http_headers") or {}, allow_redirects=True,
-                                        timeout=aiohttp.ClientTimeout(total=4)) as r:
-                    n = int(r.headers.get("Content-Length") or 0)
-                    if r.status == 200 and n > 0:
-                        f["filesize"] = n
+                headers = dict(f.get("http_headers") or {}, Range=f"bytes=0-{PROBE_BYTES - 1}")
+                async with session.get(f["url"], headers=headers, allow_redirects=True,
+                                       timeout=aiohttp.ClientTimeout(total=4)) as r:
+                    if r.status not in (200, 206):
+                        return
+                    total = r.headers.get("Content-Range", "").rpartition("/")[2]
+                    n = int(total) if total.isdigit() else (int(r.headers.get("Content-Length") or 0)
+                                                            if r.status == 200 else 0)
+                    head = b""
+                    while len(head) < PROBE_BYTES:   # never the whole file, even when Range is ignored
+                        chunk = await r.content.read(PROBE_BYTES - len(head))
+                        if not chunk:
+                            break
+                        head += chunk
+                if n > 0 and not f.get("filesize"):
+                    f["filesize"] = n
+                meta = mp4_meta(head)
+                if meta.get("height") and not f.get("height"):
+                    f["width"], f["height"] = meta["width"], meta["height"]
+                if meta.get("duration") and not item.get("duration"):
+                    item["duration"] = round(meta["duration"], 1)
             except Exception:
                 pass
 
-        await asyncio.gather(*(one(f) for f in fmts))
-        log.info("timing sizes=%.2fs n=%d", time.monotonic() - t0, len(fmts))
+        await asyncio.gather(*(one(item, f) for item, f in pairs))
+        log.info("timing sizes=%.2fs n=%d", time.monotonic() - t0, len(pairs))
 
     async def show_menu(self, chat, mid, p: Pending, rid: str | None = None):
         rid = rid or self.new_id()

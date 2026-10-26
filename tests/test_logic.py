@@ -1,7 +1,7 @@
 import time
 
 import pytest
-from conftest import MB, insta_info, yt_info
+from conftest import MB, insta_info, mp4_header, yt_info
 
 from dlbot import formats as F
 from dlbot import signing, texts
@@ -98,8 +98,8 @@ def test_instagram_progressive_without_height_picks_biggest_and_heads_only_cdn()
         {"format_id": "g", "ext": "mp4", "url": "https://rr1.googlevideo.com/v", "protocol": "https", "height": 360}]}
     info["formats"].append({"format_id": "dash-v", "ext": "mp4", "vcodec": "vp09", "acodec": "none", "height": 720,
                             "protocol": "https", "url": "https://instagram.fx.fna.fbcdn.net/v.mp4"})
-    # audio-only, video-only DASH parts and googlevideo are not probed
-    assert [f["format_id"] for f in F.sizeless_direct(info)] == ["3"]
+    # audio-only, video-only DASH parts and googlevideo are not probed; files without height are
+    assert [f["format_id"] for f in F.sizeless_direct(info)] == ["1", "2", "3"]
     opts = F.build_options(info)
     assert opts[0].spec == "2"
 
@@ -268,3 +268,23 @@ def test_audio_prefers_plain_over_drc():
                                "url": "https://rr1.googlevideo.com/a140drc"})
     opts = F.build_options(info)
     assert next(o for o in opts if o.label == "720p").spec == "136+140"
+
+
+def test_mp4_meta_reads_size_and_duration_from_header():
+    assert F.mp4_meta(mp4_header(720, 1280, 12.5)) == {"duration": 12.5, "width": 720, "height": 1280}
+    assert F.mp4_meta(mp4_header(1080, 1920, 61, v1=True)) == {"duration": 61, "width": 1080, "height": 1920}
+    assert F.mp4_meta(b"\0" * 5000) == {} and F.mp4_meta(mp4_header()[:60]) == {}
+
+
+def test_probed_instagram_progressive_wins_its_height_and_one_height_sends_at_once():
+    from dlbot.bot import is_quick, quick_option
+    info = {"id": "r", "duration": 20, "formats": [
+        {"format_id": "1", "ext": "mp4", "url": "https://instagram.fx.fna.fbcdn.net/1.mp4", "protocol": "https",
+         "filesize": 4 * MB, "width": 720, "height": 1280},
+        {"format_id": "dash-a", "ext": "m4a", "vcodec": "none", "acodec": "mp4a", "tbr": 70, "protocol": "https",
+         "url": "https://instagram.fx.fna.fbcdn.net/a.m4a"},
+        {"format_id": "dash-v", "ext": "mp4", "vcodec": "vp09", "acodec": "none", "width": 720, "height": 1280,
+         "tbr": 800, "protocol": "https", "url": "https://instagram.fx.fna.fbcdn.net/v.mp4"}]}
+    opts = F.build_options(info)
+    assert opts[0].spec == "1" and opts[0].label == "720p"     # H.264 progressive, not the VP9 DASH part
+    assert is_quick(opts) and quick_option(opts).spec == "1"

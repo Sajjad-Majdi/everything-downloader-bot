@@ -197,3 +197,49 @@ async def test_warp_watchdog_restarts_dead_tunnel(monkeypatch):
     await asyncio.sleep(0.05)
     task.cancel()
     assert starts and warp.state["restarts"] >= 1 and warp.state["ready"] is True
+
+
+async def test_fill_sizes_reads_height_duration_and_size_from_first_bytes(aiohttp_client, monkeypatch):
+    import aiohttp
+    from aiohttp import web
+    from conftest import mp4_header
+
+    from dlbot import bot as botmod
+    from dlbot import formats
+
+    body = mp4_header(540, 960, 30) + b"\0" * 200000
+    seen = []
+
+    async def ranged(request):
+        seen.append(request.headers.get("Range"))
+        start, end = request.headers["Range"].split("=")[1].split("-")
+        part = body[int(start):int(end) + 1]
+        return web.Response(status=206, body=part, content_type="video/mp4",
+                            headers={"Content-Range": f"bytes {start}-{int(start) + len(part) - 1}/{len(body)}"})
+
+    origin = web.Application()
+    origin.router.add_get("/{name}", ranged)
+    oc = await aiohttp_client(origin)
+    monkeypatch.setattr(formats, "DIRECT_HOSTS", ("127.0.0.1",))
+
+    class SessTG(FakeTG):
+        def __init__(self):
+            super().__init__()
+            self.s = aiohttp.ClientSession()
+
+        async def session(self):
+            return self.s
+
+    tg = SessTG()
+    b = botmod.Bot(cfg(), tg)
+    info = {"formats": [{"format_id": "1", "ext": "mp4", "protocol": "https", "url": str(oc.make_url("/1.mp4"))},
+                        {"format_id": "dash-a", "ext": "m4a", "vcodec": "none", "acodec": "mp4a", "tbr": 64,
+                         "protocol": "https", "url": str(oc.make_url("/a.m4a"))}]}
+    try:
+        await b.fill_sizes(info)
+    finally:
+        await tg.s.close()
+    f = info["formats"][0]
+    assert seen == [f"bytes=0-{botmod.PROBE_BYTES - 1}"]          # only the muxed file, only its head
+    assert (f["filesize"], f["width"], f["height"], info["duration"]) == (len(body), 540, 960, 30)
+    assert formats.build_options(info)[0].label == "540p"

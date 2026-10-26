@@ -49,3 +49,18 @@ def insta_info():
              "protocol": "https", "url": "https://scontent-fra.cdninstagram.com/v/prog.mp4"},
         ],
     }
+
+
+def mp4_header(w=720, h=1280, seconds=12.5, v1=False):
+    """ftyp + moov (mvhd, an audio trak and a video trak) + a bit of mdat, like Instagram's progressive files."""
+    def box(t, payload):
+        return (8 + len(payload)).to_bytes(4, "big") + t + payload
+
+    if v1:
+        mvhd = b"\1\0\0\0" + b"\0" * 16 + (1000).to_bytes(4, "big") + int(seconds * 1000).to_bytes(8, "big") + b"\0" * 80
+    else:
+        mvhd = b"\0" * 12 + (1000).to_bytes(4, "big") + int(seconds * 1000).to_bytes(4, "big") + b"\0" * 80
+    audio = b"\0" * 84
+    video = (b"\1" + b"\0" * 87 if v1 else b"\0" * 76) + (w << 16).to_bytes(4, "big") + (h << 16).to_bytes(4, "big")
+    moov = box(b"moov", box(b"mvhd", mvhd) + box(b"trak", box(b"tkhd", audio)) + box(b"trak", box(b"tkhd", video)))
+    return box(b"ftyp", b"isom\0\0\2\0isomavc1") + moov + box(b"mdat", b"\0" * 200)
