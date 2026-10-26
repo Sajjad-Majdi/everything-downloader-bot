@@ -133,7 +133,9 @@ class Bot:
         self.pending = LRU(maxsize=64, ttl=6 * 3600)
         self.file_ids = LRU(maxsize=300)
         self.jobs = asyncio.Semaphore(cfg.max_jobs)
-        self.extracts = asyncio.Semaphore(2)
+        # extraction is mostly network wait now (warm deno): 4 at once, so an X link does not wait 8 s
+        # behind two YouTube extractions (measured 2026-10-26 with 4 links at once)
+        self.extracts = asyncio.Semaphore(4)
         self._ids = itertools.count(1)
         self.tasks: set[asyncio.Task] = set()
         self._with_info: deque[Pending] = deque()

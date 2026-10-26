@@ -51,7 +51,12 @@ async def make_thumb(session: aiohttp.ClientSession, info: dict, tmpdir: str) ->
             "-vf", f"scale='min({MAX_SIDE},iw)':'min({MAX_SIDE},ih)':force_original_aspect_ratio=decrease",
             "-frames:v", "1", "-q:v", "5", out,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        await asyncio.wait_for(proc.wait(), 20)
+        try:
+            await asyncio.wait_for(proc.wait(), 20)
+        except asyncio.TimeoutError:
+            proc.kill()      # never leave an ffmpeg behind
+            await proc.wait()
+            return None
         if proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) <= MAX_BYTES:
             return out
     except Exception as e:

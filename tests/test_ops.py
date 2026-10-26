@@ -147,6 +147,7 @@ async def test_ranged_relay_fetches_googlevideo_in_chunks(aiohttp_client, monkey
     src.router.add_get("/videoplayback", origin)
     oc = await aiohttp_client(src)
     monkeypatch.setattr(stream, "RANGE_CHUNK", 10000)
+    monkeypatch.setattr(stream, "FIRST_CHUNK", 2000)
     app = make_app(cfg(), FakeTG())
     client = await aiohttp_client(app)
     st = app[STREAMER]
@@ -155,11 +156,12 @@ async def test_ranged_relay_fetches_googlevideo_in_chunks(aiohttp_client, monkey
     path = local[len(st.local_base):]
     r = await client.get(path)
     assert r.status == 200 and await r.read() == payload
-    assert seen == ["bytes=0-9999", "bytes=10000-19999", "bytes=20000-25599"]
+    assert seen == ["bytes=0-1999", "bytes=2000-11999", "bytes=12000-21999", "bytes=22000-25599"]
     seen.clear()
     r = await client.get(path, headers={"Range": "bytes=12000-"})
     assert r.status == 206 and r.headers["Content-Range"] == "bytes 12000-25599/25600"
-    assert await r.read() == payload[12000:] and seen == ["bytes=12000-21999", "bytes=22000-25599"]
+    assert await r.read() == payload[12000:] and seen == ["bytes=12000-13999", "bytes=14000-23999",
+                                                         "bytes=24000-25599"]
     r = await client.get(path, headers={"Range": "bytes=5-9"})
     assert r.status == 206 and await r.read() == payload[5:10]
     assert (await client.get("/_src/unknown")).status == 404

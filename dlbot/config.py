@@ -28,7 +28,7 @@ class Config:
     owner_id: int | None = None
     bench_key: str = ""
     api_base: str = "https://api.telegram.org"
-    max_jobs: int = 1
+    max_jobs: int = 2
     max_streams: int = 2
     cookie_file: str | None = None
 
@@ -50,7 +50,8 @@ class Config:
             owner_id=id_list[0] if id_list else None,
             bench_key=env.get("BENCH_KEY", "").strip(),
             api_base=env.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/"),
-            max_jobs=max(1, int(env.get("MAX_JOBS", "1"))),
+            # 2 jobs: a short clip no longer waits behind a long download (peak ~320 of 512 MB, 2026-10-26)
+            max_jobs=max(1, int(env.get("MAX_JOBS", "2"))),
             max_streams=max(1, int(env.get("MAX_STREAMS", "2"))),
         )
         cookies = env.get("COOKIES_B64", "").strip()

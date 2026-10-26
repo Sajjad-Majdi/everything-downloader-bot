@@ -22,6 +22,7 @@ CHUNK = 64 * 1024
 # 720p /dl link through WARP, while yt-dlp's 10 MB range requests got ~6 MB/s). googlevideo
 # sources are therefore fetched in RANGE_CHUNK pieces, like yt-dlp's http_chunk_size.
 RANGE_CHUNK = int(os.environ.get("RANGE_CHUNK_MB", "10")) * 1024 * 1024
+FIRST_CHUNK = 1024 * 1024   # small first piece: ffmpeg (and the phone) get the first bytes sooner
 LOCAL_HOSTS = ("127.0.0.1", "::1")
 PASS_HEADERS = ("Content-Length", "Content-Range", "Accept-Ranges", "Content-Type", "Last-Modified", "ETag")
 
@@ -146,7 +147,7 @@ class Streamer:
         resp: web.StreamResponse | None = None
         pos, total = start, None
         while True:
-            stop = pos + RANGE_CHUNK - 1
+            stop = pos + (min(FIRST_CHUNK, RANGE_CHUNK) if resp is None else RANGE_CHUNK) - 1
             if end is not None:
                 stop = min(stop, end)
             if total is not None:
