@@ -1,6 +1,9 @@
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+# Python threads (asyncio.to_thread) each got a glibc malloc arena: 5 links at once left ~300 MB RSS
+# in the 512 MB container (2026-10-26). Two arenas keep it small.
+ENV MALLOC_ARENA_MAX=2
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
