@@ -182,10 +182,71 @@ async def test_instagram_small_is_sent_by_url(setup, monkeypatch):
     b, tg = setup
     monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: insta_info())
     await b.handle_update(msg("https://www.instagram.com/reel/C1/"))
-    await b.handle_update(cb(data_of(tg.last_markup(), "720p")))
+    # no quality menu for Instagram: the video goes out at once
+    assert not any(T.CHOOSE in (t or "") for t in tg.texts())
     sent = [p for m, p in tg.calls if m == "sendVideo"]
     assert sent and sent[0]["video"].startswith("https://scontent-fra.cdninstagram.com/")
     assert not tg.uploads
+
+
+async def test_quick_send_has_other_qualities_button(setup, monkeypatch):
+    b, tg = setup
+    info = insta_info()
+    info["formats"].append({"format_id": "low", "ext": "mp4", "width": 360, "height": 640, "filesize": 1 * MB,
+                            "protocol": "https", "url": "https://scontent.cdninstagram.com/v/low.mp4"})
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: info)
+    await b.handle_update(msg("https://www.instagram.com/reel/C1/"))
+    sent = [p for m, p in tg.calls if m == "sendVideo"]
+    assert len(sent) == 1 and sent[0]["video"].endswith("prog.mp4")      # best one, by URL
+    more = sent[0]["reply_markup"]
+    await b.handle_update(cb(data_of(more, T.OTHER_QUALITIES)))
+    assert T.CHOOSE in tg.texts()[-1]
+    await b.handle_update(cb(data_of(tg.last_markup(), "360p")))
+    sent = [p for m, p in tg.calls if m == "sendVideo"]
+    assert len(sent) == 2 and sent[1]["video"].endswith("low.mp4")
+
+
+async def test_youtube_shorts_and_short_clips_skip_menu(setup, monkeypatch):
+    b, tg = setup
+
+    def dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
+        p = os.path.join(tmpdir, "video.mp4")
+        open(p, "wb").close()
+        return p
+
+    monkeypatch.setattr(ytdl, "download", dl)
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: yt_info(duration=600))
+    await b.handle_update(msg("https://www.youtube.com/shorts/abc"))
+    b.file_ids._d.clear()   # same video id: skip the file_id cache so the second one uploads too
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: yt_info(duration=45))
+    await b.handle_update(msg("https://www.youtube.com/watch?v=abc"))
+    assert not any(T.CHOOSE in (t or "") for t in tg.texts())
+    assert len(tg.uploads) == 2
+    # a long normal YouTube video still gets the menu
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: yt_info(duration=600))
+    await b.handle_update(msg("https://www.youtube.com/watch?v=abc"))
+    assert T.CHOOSE in tg.texts()[-1]
+
+
+async def test_double_tap_starts_one_job(setup, monkeypatch):
+    import asyncio
+    b, tg = setup
+    monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: yt_info())
+    started = []
+
+    def dl(url, spec, tmpdir, progress, index=None, cookie_file=None, limit=0, info=None):
+        started.append(spec)
+        import time
+        time.sleep(0.3)
+        p = os.path.join(tmpdir, "video.mp4")
+        open(p, "wb").close()
+        return p
+
+    monkeypatch.setattr(ytdl, "download", dl)
+    await b.handle_update(msg("https://youtu.be/abc"))
+    data = data_of(tg.last_markup(), "360p")
+    await asyncio.gather(b.handle_update(cb(data)), b.handle_update(cb(data)))
+    assert started == ["18"] and len(tg.uploads) == 1
 
 
 async def test_url_send_failure_falls_back_to_upload(monkeypatch):
@@ -200,7 +261,6 @@ async def test_url_send_failure_falls_back_to_upload(monkeypatch):
 
     monkeypatch.setattr(ytdl, "download", dl)
     await b.handle_update(msg("https://www.instagram.com/reel/C1/"))
-    await b.handle_update(cb(data_of(tg.last_markup(), "720p")))
     assert len(tg.uploads) == 1
 
 
@@ -213,6 +273,13 @@ async def test_carousel_menu_and_all(setup, monkeypatch):
     monkeypatch.setattr(ytdl, "extract", lambda url, c=None, e=None, f=True: {"_type": "playlist", "title": "Post",
                                                               "entries": [item1, image, item2]})
     await b.handle_update(msg("https://www.instagram.com/p/X/"))
+    # an Instagram post with two videos: both go out at once, no item menu
+    sent = [p["video"] for m, p in tg.calls if m == "sendVideo"]
+    assert len(sent) == 2 and sent[1].endswith("two.mp4")
+    assert T.CAROUSEL.format(n=T.fa(2)) not in tg.texts()
+    # other sites still get the item menu with "all"
+    tg.calls.clear()
+    await b.handle_update(msg("https://example.com/gallery/X"))
     assert tg.texts()[-1] == T.CAROUSEL.format(n=T.fa(2))
     await b.handle_update(cb(data_of(tg.last_markup(), T.ALL_ITEMS)))
     sent = [p["video"] for m, p in tg.calls if m == "sendVideo"]

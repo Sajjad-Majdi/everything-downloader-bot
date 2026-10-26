@@ -22,7 +22,7 @@ NOWIN = 0x08000000 if os.name == "nt" else 0
 def no_proxy(monkeypatch):
     # the laptop's system proxy must not see 127.0.0.1 test traffic
     orig = ytdl.base_opts
-    monkeypatch.setattr(ytdl, "base_opts", lambda c=None: orig(c) | {"proxy": ""})
+    monkeypatch.setattr(ytdl, "base_opts", lambda c=None, u=None: orig(c, u) | {"proxy": ""})
 
 
 def run(cmd):

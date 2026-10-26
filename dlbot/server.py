@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from aiohttp import web
 
-from . import ytdl
+from . import warp, ytdl
 from .bot import Bot, Pending, auto_option
 from .formats import build_options, entries_of
 from .config import Config
@@ -49,7 +49,8 @@ async def health(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "commit": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
                               "token": bool(request.app[CFG].bot_token), "up": int(time.monotonic() - STARTED),
                               "tasks": len(bot.tasks), "streams": request.app[STREAMER].active,
-                              "webhook_ok": request.app[STATE].get("webhook_ok")})
+                              "webhook_ok": request.app[STATE].get("webhook_ok"),
+                              "warp": warp.state["ready"], "warp_error": warp.state["error"]})
 
 
 async def logs(request: web.Request) -> web.Response:
@@ -96,6 +97,8 @@ async def bench(request: web.Request) -> web.Response:
     extra, dbg = {}, None
     if request.query.get("pc"):
         extra["extractor_args"] = {"youtube": {"player_client": request.query["pc"].split(",")}}
+    if request.query.get("warp") == "0":   # compare with the direct (blocked) route
+        extra["proxy"] = ""
     if request.query.get("dbg") == "1":
         dbg = ytdl.DebugLog()
         extra |= {"logger": dbg, "verbose": True, "quiet": False}
@@ -111,7 +114,8 @@ async def bench(request: web.Request) -> web.Response:
     extract_s = round(time.monotonic() - t0, 2)
     if request.query.get("only") == "extract":
         out = {"extract": extract_s, "formats": len(info.get("formats") or []),
-               "client": info.get("_fast_client") or "default", "log": dbg.lines[-120:] if dbg else None}
+               "client": info.get("_fast_client") or "default", "warp": warp.state["ready"] and "proxy" not in extra,
+               "log": dbg.lines[-120:] if dbg else None}
         if request.query.get("fmts") == "1":
             out["list"] = [{k: f.get(k) for k in ("format_id", "ext", "vcodec", "acodec", "width", "height", "tbr",
                                                    "filesize", "filesize_approx", "protocol")}
@@ -206,10 +210,17 @@ async def netbench(request: web.Request) -> web.Response:
 WARMUP_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"  # 19 s public clip
 
 
+async def boot(app: web.Application):
+    """WARP tunnel for YouTube first (YouTube blocks Render's IP), then the warm-up extraction."""
+    await warp.start()
+    if app[CFG].bot_token and os.environ.get("WARMUP", "1") == "1":
+        await warm_up(app)
+
+
 async def warm_up(app: web.Application):
     """One YouTube extraction at boot fills the yt-dlp cache (player JS, solver), so the
     first real link does not pay for it."""
-    await asyncio.sleep(3)
+    await asyncio.sleep(1)
     t0 = time.monotonic()
     try:
         async with app[BOT].extracts:
@@ -314,12 +325,12 @@ def make_app(cfg: Config | None = None, tg: Telegram | None = None) -> web.Appli
         app[BOT].spawn(set_webhook(app))
         if cfg.bot_token and cfg.public_url and os.environ.get("WEBHOOK_GUARD", "1") == "1":
             background.append(asyncio.create_task(webhook_guard(app)))
-        if cfg.bot_token and os.environ.get("WARMUP", "1") == "1":
-            app[BOT].spawn(warm_up(app))
+        background.append(asyncio.create_task(boot(app)))
 
     async def on_cleanup(app):
         for t in background:
             t.cancel()
+        warp.stop()
         await app[STREAMER].close()
         await app[TG].close()
 

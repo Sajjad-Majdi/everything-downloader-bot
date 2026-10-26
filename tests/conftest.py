@@ -2,6 +2,7 @@ import os
 import sys
 
 os.environ["WARMUP"] = "0"
+os.environ["YT_PROXY"] = "off"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 MB = 1024 * 1024

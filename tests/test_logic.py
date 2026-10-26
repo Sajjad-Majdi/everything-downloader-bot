@@ -81,8 +81,24 @@ def test_plan_small_instagram_sends_url_then_big_gives_direct():
     assert F.plan(o) == "direct_link"
     o.size = 30 * MB
     assert F.plan(o) == "upload"
-    o.size = None
-    assert F.plan(o) == "upload"
+    o.size = None                      # unknown size on an open CDN: Telegram tries the URL first
+    assert F.plan(o) == "url_send"
+    yt = F.build_options(yt_info())[0]
+    yt.size = None                     # googlevideo is locked to our IP: download
+    assert F.plan(yt) == "upload"
+
+
+def test_instagram_progressive_without_height_picks_biggest_and_heads_only_cdn():
+    info = {"id": "r", "duration": 20, "formats": [
+        {"format_id": "1", "ext": "mp4", "url": "https://instagram.fx.fna.fbcdn.net/1.mp4", "protocol": "https", "filesize": 2 * MB},
+        {"format_id": "2", "ext": "mp4", "url": "https://instagram.fx.fna.fbcdn.net/2.mp4", "protocol": "https", "filesize": 5 * MB},
+        {"format_id": "3", "ext": "mp4", "url": "https://instagram.fx.fna.fbcdn.net/3.mp4", "protocol": "https"},
+        {"format_id": "dash-a", "ext": "m4a", "vcodec": "none", "acodec": "mp4a", "protocol": "https",
+         "url": "https://instagram.fx.fna.fbcdn.net/a.m4a"},
+        {"format_id": "g", "ext": "mp4", "url": "https://rr1.googlevideo.com/v", "protocol": "https", "height": 360}]}
+    assert [f["format_id"] for f in F.sizeless_direct(info)] == ["3"]   # audio and googlevideo are not probed
+    opts = F.build_options(info)
+    assert opts[0].spec == "2"
 
 
 def test_direct_url_rejects_lookalike_host():

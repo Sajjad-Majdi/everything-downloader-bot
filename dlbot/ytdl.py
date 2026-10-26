@@ -10,6 +10,7 @@ import time
 
 from yt_dlp import YoutubeDL
 
+from . import warp
 from .config import TG_UPLOAD_LIMIT
 
 log = logging.getLogger("ytdl")
@@ -58,7 +59,8 @@ class _Logger:
         log.warning("yt-dlp error: %s", msg)
 
 
-def base_opts(cookie_file: str | None = None) -> dict:
+def base_opts(cookie_file: str | None = None, url: str | None = None) -> dict:
+    """Common yt-dlp options; YouTube URLs go through the WARP proxy when it is up."""
     opts = {
         "quiet": True,
         "noprogress": True,
@@ -74,6 +76,9 @@ def base_opts(cookie_file: str | None = None) -> dict:
     }
     if cookie_file:
         opts["cookiefile"] = cookie_file
+    proxy = warp.proxy_for(url)
+    if proxy:
+        opts["proxy"] = proxy
     return opts
 
 
@@ -109,7 +114,7 @@ def extract(url: str, cookie_file: str | None = None, extra: dict | None = None,
     cookies (~2-3 s at 0.1 CPU); fall back to the full path (cookies + deno) when it fails."""
     extra = extra or {}
     if fast and FAST_CLIENT and YT_RE.match(url) and "list=" not in url and "/playlist" not in url:
-        opts = base_opts(None) | extra | {
+        opts = base_opts(None, url) | extra | {
             "extractor_args": {"youtube": {"player_client": FAST_CLIENT.split(",")}}}
         try:
             with YoutubeDL(opts) as ydl:
@@ -120,14 +125,14 @@ def extract(url: str, cookie_file: str | None = None, extra: dict | None = None,
             log.info("fast client gave no usable formats; full extraction")
         except Exception as e:
             log.info("fast client failed (%s); full extraction", str(e)[:120])
-    with YoutubeDL(base_opts(cookie_file) | extra) as ydl:
+    with YoutubeDL(base_opts(cookie_file, url) | extra) as ydl:
         info = ydl.extract_info(url, download=False)
         return ydl.sanitize_info(info)
 
 
 def resolve(url: str, spec: str, index: int | None = None, cookie_file: str | None = None) -> dict:
     """Fresh media URLs (and headers) for one chosen format spec."""
-    opts = base_opts(cookie_file) | {"format": spec}
+    opts = base_opts(cookie_file, url) | {"format": spec}
     if index:
         opts |= {"noplaylist": False, "playlist_items": str(index), "extract_flat": False}
     with YoutubeDL(opts) as ydl:
@@ -172,7 +177,7 @@ def download(url: str, spec: str, tmpdir: str, progress: dict, index: int | None
         elif d.get("status") == "finished":
             progress["t_pp_end"] = time.monotonic()
 
-    opts = base_opts(cookie_file) | {
+    opts = base_opts(cookie_file, url) | {
         "format": spec,
         "outtmpl": os.path.join(tmpdir, "video.%(ext)s"),
         "merge_output_format": "mp4",

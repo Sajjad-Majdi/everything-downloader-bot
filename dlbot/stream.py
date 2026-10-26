@@ -9,7 +9,7 @@ from urllib.parse import quote
 import aiohttp
 from aiohttp import web
 
-from . import ytdl
+from . import warp, ytdl
 from .cache import LRU
 from .config import Config
 from .signing import BadToken, verify
@@ -28,9 +28,11 @@ def disposition(name: str) -> str:
     return f"attachment; filename=\"video.mp4\"; filename*=UTF-8''{quote(name)}"
 
 
-def ffmpeg_cmd(formats: list[dict]) -> list[str]:
+def ffmpeg_cmd(formats: list[dict], proxy: str | None = None) -> list[str]:
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
     for f in formats:
+        if proxy:   # googlevideo URLs only work from the IP that extracted them (the WARP tunnel)
+            cmd += ["-http_proxy", proxy]
         hdrs = dict(f.get("http_headers") or {})
         ua = hdrs.pop("User-Agent", None)
         if (f.get("protocol") or "https") in ("http", "https"):
@@ -80,9 +82,10 @@ class Streamer:
                 self.resolved.put(token, info)
             fmts = info.get("requested_formats") or [info]
             name = safe_name(body.get("t") or info.get("title"))
+            via = warp.proxy_for(body["u"])
             if len(fmts) == 1:
-                return await self.proxy(request, fmts[0], name)
-            return await self.remux(request, fmts, name)
+                return await self.proxy(request, fmts[0], name, via)
+            return await self.remux(request, fmts, name, via)
         except (ConnectionResetError, asyncio.CancelledError):
             raise
         except Exception as e:
@@ -91,13 +94,13 @@ class Streamer:
         finally:
             self.active -= 1
 
-    async def proxy(self, request: web.Request, f: dict, name: str) -> web.StreamResponse:
+    async def proxy(self, request: web.Request, f: dict, name: str, via: str | None = None) -> web.StreamResponse:
         headers = dict(f.get("http_headers") or {})
         if "Range" in request.headers:
             headers["Range"] = request.headers["Range"]
         s = await self.session()
         method = "HEAD" if request.method == "HEAD" else "GET"
-        async with s.request(method, f["url"], headers=headers) as up:
+        async with s.request(method, f["url"], headers=headers, proxy=via) as up:
             if up.status >= 400:
                 return web.Response(status=502, text=f"Source returned {up.status}")
             resp = web.StreamResponse(status=up.status)
@@ -113,7 +116,7 @@ class Streamer:
             await resp.write_eof()
             return resp
 
-    async def remux(self, request: web.Request, fmts: list[dict], name: str) -> web.StreamResponse:
+    async def remux(self, request: web.Request, fmts: list[dict], name: str, via: str | None = None) -> web.StreamResponse:
         resp = web.StreamResponse(status=200)
         resp.headers["Content-Type"] = "video/mp4"
         resp.headers["Accept-Ranges"] = "none"
@@ -123,7 +126,7 @@ class Streamer:
             await resp.write_eof()
             return resp
         proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_cmd(fmts), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            *ffmpeg_cmd(fmts, via), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             stdin=asyncio.subprocess.DEVNULL)
         try:
             first = await proc.stdout.read(CHUNK)

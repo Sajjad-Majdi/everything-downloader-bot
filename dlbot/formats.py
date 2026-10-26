@@ -124,7 +124,8 @@ def build_options(info: dict) -> list[Option]:
         groups.setdefault(bucket(p_of(f)), []).append(f)
     options: list[Option] = []
     for b in sorted(groups):
-        pick = max(groups[b], key=lambda f: (codec_score(f), has_audio(f), proto_score(f), f.get("tbr") or 0))
+        pick = max(groups[b], key=lambda f: (codec_score(f), has_audio(f), proto_score(f), f.get("tbr") or 0,
+                                             f.get("filesize") or 0))
         options.append(_make(f"{b}p" if b else "ویدیو", pick, audio, duration))
     options = options[-MAX_OPTIONS:]
     top = max(vids, key=lambda f: (p_of(f), f.get("tbr") or 0, proto_score(f)))
@@ -135,6 +136,11 @@ def build_options(info: dict) -> list[Option]:
     return options
 
 
+def is_direct_host(url: str | None) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in DIRECT_HOSTS)
+
+
 def direct_url(opt: Option) -> str | None:
     """A media URL the phone can fetch itself, or None if it must go through us."""
     if opt.audio is not None:
@@ -142,17 +148,27 @@ def direct_url(opt: Option) -> str | None:
     v = opt.video
     if proto_score(v) == 0 or not v.get("url"):
         return None
-    host = (urlparse(v["url"]).hostname or "").lower()
-    if any(host == h or host.endswith("." + h) for h in DIRECT_HOSTS):
-        return v["url"]
-    return None
+    return v["url"] if is_direct_host(v["url"]) else None
+
+
+def sizeless_direct(info: dict, limit: int = 8) -> list[dict]:
+    """Video formats on open CDNs (Instagram, X) with no size: a HEAD request can tell it."""
+    out = []
+    for item in (entries_of(info) or [info]):
+        for f in _formats(item):
+            if (not f.get("filesize") and not f.get("filesize_approx") and f.get("url") and is_video(f)
+                    and proto_score(f) and is_direct_host(f["url"])):
+                out.append(f)
+    return out[:limit]
 
 
 def plan(opt: Option) -> str:
     """Return one of: url_send, upload, direct_link, stream_link."""
     direct = direct_url(opt)
     if opt.size is None:
-        return "upload"  # downloader aborts at the limit and falls back to a link
+        # Open CDN: let Telegram try to fetch it (it gives up above ~20 MB and we upload instead).
+        # Else download; the downloader aborts at the limit and falls back to a link.
+        return "url_send" if direct else "upload"
     if opt.size <= SAFE_UPLOAD_LIMIT:
         if direct and opt.size <= URL_SEND_LIMIT:
             return "url_send"

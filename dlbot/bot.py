@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+
+import aiohttp
 import logging
 import re
 import shutil
@@ -10,12 +12,13 @@ import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 from . import texts as T
 from . import ytdl
 from .cache import LRU
 from .config import LINK_TTL, SAFE_UPLOAD_LIMIT, Config
-from .formats import (Option, build_options, direct_url, entries_of, entry_is_resolved, plan)
+from .formats import (Option, build_options, direct_url, entries_of, entry_is_resolved, plan, sizeless_direct)
 from .signing import sign
 from .tg import Telegram, TgError, keyboard
 from .thumbs import make_thumb
@@ -25,6 +28,12 @@ URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 EDIT_EVERY = 3.0
 INFO_FRESH = 20 * 60      # reuse extracted media URLs for this long, then extract again
 KEEP_INFOS = 6            # info dicts are large; keep only the newest few in RAM
+# Links from these sites go out at once in a good quality, with no quality menu (like the
+# competitor bots); a button under the video still offers the other qualities.
+QUICK_HOSTS = ("instagram.com", "x.com", "twitter.com", "tiktok.com", "threads.net", "threads.com",
+               "facebook.com", "fb.watch", "reddit.com", "pinterest.com", "pin.it", "snapchat.com")
+QUICK_MAX_SECONDS = 90    # any clip this short is sent at once too (YouTube Shorts, short videos)
+AUTO_MAX_P = 720          # quality cap for the automatic pick when we must upload the file ourselves
 
 
 @dataclass
@@ -54,6 +63,32 @@ def auto_option(options: list[Option]) -> Option:
         return fits[-1]
     unknown = [o for o in options if o.size is None]
     return unknown[-1] if unknown else options[0]
+
+
+def quick_option(options: list[Option]) -> Option:
+    """Pick for an automatic send: the best one Telegram fetches by URL itself (costs us nothing),
+    else the best one up to AUTO_MAX_P that fits the upload cap, else auto_option()."""
+    by_url = [o for o in options if not o.best and plan(o) == "url_send"]
+    if by_url:
+        return by_url[-1]
+    capped = [o for o in options if not o.best and 0 < o.height <= AUTO_MAX_P and o.size is not None
+              and o.size <= SAFE_UPLOAD_LIMIT]
+    if capped:
+        return capped[-1]
+    return auto_option(options)
+
+
+def is_social(url: str) -> bool:
+    host = (urlparse(url or "").hostname or "").lower()
+    return any(host == h or host.endswith("." + h) for h in QUICK_HOSTS)
+
+
+def is_quick(url: str, info: dict, options: list[Option]) -> bool:
+    """Send at once instead of showing the quality menu."""
+    if len(options) <= 1 or is_social(url) or "/shorts/" in (url or ""):
+        return True
+    dur = info.get("duration")
+    return bool(dur and dur <= QUICK_MAX_SECONDS)
 
 
 def option_rows(rid: str, options: list[Option]) -> list[list[tuple[str, str]]]:
@@ -92,6 +127,7 @@ class Bot:
         self._ids = itertools.count(1)
         self.tasks: set[asyncio.Task] = set()
         self._with_info: deque[Pending] = deque()
+        self.busy: set[tuple[int, int]] = set()   # (chat, message) with a job running: double taps are ignored
 
     # entry point -----------------------------------------------------------
     def spawn(self, coro):
@@ -142,6 +178,7 @@ class Bot:
             log.warning("extract failed for %s: %s", url, e)
             await self.tg.edit(chat, mid, T.error_text(e))
             return
+        await self.fill_sizes(info)
         rid = self.new_id()
         entries = entries_of(info)
         if entries:
@@ -153,11 +190,13 @@ class Bot:
                     return
                 if len(vids) == 1:
                     idx, e = vids[0]
-                    return await self.show_menu(chat, mid, Pending(url, e.get("title") or info.get("title") or "",
-                                                                    e.get("duration"), build_options(e), index=idx,
-                                                                    info=e))
+                    return await self.offer(chat, mid, url, e, Pending(url, e.get("title") or info.get("title") or "",
+                                                                       e.get("duration"), build_options(e), index=idx,
+                                                                       info=e))
                 p = Pending(url, info.get("title") or "", entries=[dict(e, _index=i) for i, e in vids], carousel=True)
                 self.pending.put(rid, p)
+                if is_social(url):   # a post with several videos: send them all, like the other bots
+                    return await self.send_all(chat, mid, p)
                 rows = [[(T.ITEM.format(i=T.fa(n + 1)), f"e:{rid}:{n}")] for n in range(len(vids))]
                 rows.append([(T.ALL_ITEMS, f"a:{rid}")])
                 await self.tg.edit(chat, mid, T.CAROUSEL.format(n=T.fa(len(vids))), keyboard(rows))
@@ -171,8 +210,40 @@ class Bot:
         if not options:
             await self.tg.edit(chat, mid, T.NO_VIDEO)
             return
-        await self.show_menu(chat, mid, Pending(info.get("webpage_url") or url, info.get("title") or "",
-                                                info.get("duration"), options, info=info), rid)
+        await self.offer(chat, mid, url, info, Pending(info.get("webpage_url") or url, info.get("title") or "",
+                                                       info.get("duration"), options, info=info), rid)
+
+    async def offer(self, chat, mid, url: str, info: dict, p: Pending, rid: str | None = None):
+        """Quality menu, or for quick links (social, short, one choice) the video right away."""
+        if not is_quick(url, info, p.options):
+            return await self.show_menu(chat, mid, p, rid)
+        rid = rid or self.new_id()
+        self.pending.put(rid, p)
+        self.keep_info(p)
+        more = keyboard([[(T.OTHER_QUALITIES, f"m:{rid}")]]) if len(p.options) > 1 else None
+        await self.deliver(chat, mid, p, quick_option(p.options), markup=more)
+
+    async def fill_sizes(self, info: dict):
+        """Instagram/X often give no file size: HEAD the open-CDN formats in parallel (~0.2 s) so the
+        menu shows real sizes and the best progressive file can be picked and sent by URL."""
+        fmts = sizeless_direct(info)
+        session = await self.tg.session() if fmts else None
+        if session is None:
+            return
+        t0 = time.monotonic()
+
+        async def one(f):
+            try:
+                async with session.head(f["url"], headers=f.get("http_headers") or {}, allow_redirects=True,
+                                        timeout=aiohttp.ClientTimeout(total=4)) as r:
+                    n = int(r.headers.get("Content-Length") or 0)
+                    if r.status == 200 and n > 0:
+                        f["filesize"] = n
+            except Exception:
+                pass
+
+        await asyncio.gather(*(one(f) for f in fmts))
+        log.info("timing sizes=%.2fs n=%d", time.monotonic() - t0, len(fmts))
 
     async def show_menu(self, chat, mid, p: Pending, rid: str | None = None):
         rid = rid or self.new_id()
@@ -209,9 +280,23 @@ class Bot:
                 await self.tg.edit(chat, mid, T.EXPIRED)
             return
         kind = parts[0]
+        if kind in ("q", "a"):
+            if (chat, mid) in self.busy:   # double tap on the same button: one job is enough
+                return
+            self.busy.add((chat, mid))
+        try:
+            await self._on_button(kind, parts, p, chat, mid)
+        finally:
+            if kind in ("q", "a"):
+                self.busy.discard((chat, mid))
+
+    async def _on_button(self, kind: str, parts: list[str], p: Pending, chat: int, mid: int):
         if kind == "q":
             opt = p.options[int(parts[2])]
             await self.deliver(chat, mid, p, opt)
+        elif kind == "m":   # "other qualities" under an automatically sent video: the menu in a new message
+            status = await self.tg.send(chat, T.CHOOSE)
+            await self.show_menu(chat, status["message_id"], p, parts[1])
         elif kind == "e":
             e = p.entries[int(parts[2])]
             if p.carousel:
@@ -221,18 +306,22 @@ class Bot:
                 await self.tg.edit(chat, mid, T.CHECKING)
                 await self.analyze(chat, mid, e.get("url") or e.get("webpage_url"))
         elif kind == "a" and p.carousel:
-            await self.tg.edit(chat, mid, T.PREPARING)
-            for e in p.entries:
-                opts = build_options(e)
-                sub = Pending(p.url, e.get("title") or p.title, e.get("duration"), opts, index=e["_index"], info=e, t=p.t)
-                status = await self.tg.send(chat, T.PREPARING)
-                await self.deliver(chat, status["message_id"], sub, auto_option(opts))
-            await self.tg.delete(chat, mid)
+            await self.send_all(chat, mid, p)
+
+    async def send_all(self, chat: int, mid: int, p: Pending):
+        """Every video of a carousel, one after another; `mid` (menu or status) is removed at the end."""
+        await self.tg.edit(chat, mid, T.PREPARING)
+        for e in p.entries:
+            opts = build_options(e)
+            sub = Pending(p.url, e.get("title") or p.title, e.get("duration"), opts, index=e["_index"], info=e, t=p.t)
+            status = await self.tg.send(chat, T.PREPARING)
+            await self.deliver(chat, status["message_id"], sub, quick_option(opts))
+        await self.tg.delete(chat, mid)
 
     # delivery ------------------------------------------------------------------
-    async def deliver(self, chat: int, mid: int, p: Pending, opt: Option):
+    async def deliver(self, chat: int, mid: int, p: Pending, opt: Option, markup: dict | None = None):
         try:
-            res = await self.run_job(chat, mid, p, opt)
+            res = await self.run_job(chat, mid, p, opt, markup=markup)
         except Exception as e:
             log.exception("job failed")
             await self.tg.edit(chat, mid, T.error_text(e))
@@ -243,13 +332,15 @@ class Bot:
             await self.tg.delete(chat, mid)
 
     async def run_job(self, chat: int, mid: int | None, p: Pending, opt: Option, reuse: bool = True,
-                      quiet: bool = False, diag: dict | None = None) -> dict:
+                      quiet: bool = False, diag: dict | None = None, markup: dict | None = None) -> dict:
         """Send one video. Returns timings; {"link": mode} when it must go out as a link instead."""
         t0 = time.monotonic()
         tm: dict = {"spec": opt.spec, "size": opt.size}
         key = (p.url, p.index, opt.spec)
         caption = p.title[:900]
         extra = {"disable_notification": True} if quiet else {}
+        if markup:
+            extra["reply_markup"] = markup
 
         async def status(text):
             if mid is not None:
@@ -262,7 +353,7 @@ class Bot:
         if fid and not quiet:
             try:
                 res = await self.tg.call("sendVideo", chat_id=chat, video=fid, caption=caption,
-                                         supports_streaming=True)
+                                         supports_streaming=True, **({"reply_markup": markup} if markup else {}))
                 tm.update(mode="cached", total=round(time.monotonic() - t0, 2), msg=res.get("message_id"))
                 log.info("timing job %s", tm)
                 return tm
