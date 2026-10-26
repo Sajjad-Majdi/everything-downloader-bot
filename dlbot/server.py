@@ -44,8 +44,43 @@ class RingHandler(logging.Handler):
             pass
 
 
+def _read(path: str) -> str:
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except Exception:
+        return ""
+
+
+def mem_report() -> dict:
+    """Container memory (cgroup), RSS per process name and where temp files live (Render free = 512 MB)."""
+    cur = _read("/sys/fs/cgroup/memory.current") or _read("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    peak = _read("/sys/fs/cgroup/memory.peak") or _read("/sys/fs/cgroup/memory/memory.max_usage_in_bytes")
+    lim = _read("/sys/fs/cgroup/memory.max") or _read("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    mb = lambda v: round(int(v) / 1048576) if v and v.isdigit() else v or None
+    procs: dict[str, int] = {}
+    for pid in (p for p in os.listdir("/proc") if p.isdigit()) if os.path.isdir("/proc") else []:
+        st = _read(f"/proc/{pid}/status")
+        name = next((ln.split()[1] for ln in st.splitlines() if ln.startswith("Name:")), None)
+        rss = next((int(ln.split()[1]) for ln in st.splitlines() if ln.startswith("VmRSS:")), 0)
+        if name:
+            procs[name] = procs.get(name, 0) + rss // 1024
+    import tempfile
+    tmp = tempfile.gettempdir()
+    fs = next((ln.split()[2] for ln in _read("/proc/mounts").splitlines() if ln.split()[1:2] == [tmp]), "overlay?")
+    try:
+        sv = os.statvfs(tmp)
+        tmp_free = round(sv.f_bavail * sv.f_frsize / 1048576)
+    except Exception:
+        tmp_free = None
+    return {"cgroup_mb": mb(cur), "peak_mb": mb(peak), "limit_mb": mb(lim), "rss_mb": procs, "tmp": tmp,
+            "tmp_fs": fs, "tmp_free_mb": tmp_free}
+
+
 async def health(request: web.Request) -> web.Response:
     bot = request.app[BOT]
+    if request.query.get("mem") == "1":
+        return web.json_response(mem_report())
     return web.json_response({"ok": True, "commit": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
                               "token": bool(request.app[CFG].bot_token), "up": int(time.monotonic() - STARTED),
                               "tasks": len(bot.tasks), "streams": request.app[STREAMER].active,

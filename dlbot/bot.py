@@ -104,6 +104,16 @@ def _time_read(path: str) -> float:
     return round(time.monotonic() - t, 2)
 
 
+def _cgroup_mb() -> int | None:
+    for path in ("/sys/fs/cgroup/memory.peak", "/sys/fs/cgroup/memory.current"):
+        try:
+            with open(path) as fh:
+                return round(int(fh.read().strip()) / 1048576)
+        except Exception:
+            continue
+    return None
+
+
 def dl_timings(progress: dict) -> dict:
     """prep = yt-dlp work before the first byte, transfer = bytes on the wire, merge = ffmpeg."""
     s0 = progress.get("t_start")
@@ -431,6 +441,9 @@ class Bot:
 
     def _done(self, tm: dict, t0: float, key, res: dict) -> dict:
         self.remember(key, res)
+        cur = _cgroup_mb()
+        if cur:
+            tm["mem_mb"] = cur
         tm.update(total=round(time.monotonic() - t0, 2), msg=res.get("message_id"))
         log.info("timing job %s", {k: v for k, v in tm.items() if k != "msg"})
         return tm
