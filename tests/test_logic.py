@@ -96,7 +96,10 @@ def test_instagram_progressive_without_height_picks_biggest_and_heads_only_cdn()
         {"format_id": "dash-a", "ext": "m4a", "vcodec": "none", "acodec": "mp4a", "protocol": "https",
          "url": "https://instagram.fx.fna.fbcdn.net/a.m4a"},
         {"format_id": "g", "ext": "mp4", "url": "https://rr1.googlevideo.com/v", "protocol": "https", "height": 360}]}
-    assert [f["format_id"] for f in F.sizeless_direct(info)] == ["3"]   # audio and googlevideo are not probed
+    info["formats"].append({"format_id": "dash-v", "ext": "mp4", "vcodec": "vp09", "acodec": "none", "height": 720,
+                            "protocol": "https", "url": "https://instagram.fx.fna.fbcdn.net/v.mp4"})
+    # audio-only, video-only DASH parts and googlevideo are not probed
+    assert [f["format_id"] for f in F.sizeless_direct(info)] == ["3"]
     opts = F.build_options(info)
     assert opts[0].spec == "2"
 
@@ -248,6 +251,14 @@ def test_youtube_https_dash_beats_muxed_hls():
                             "url": "https://manifest.googlevideo.com/hls"})
     o = next(o for o in F.build_options(info) if o.label == "720p")
     assert o.spec == "136+140"
+
+
+def test_audio_prefers_stereo_over_surround():
+    info = yt_info()
+    info["formats"].insert(1, {"format_id": "258", "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2",
+                               "abr": 384, "audio_channels": 6, "filesize": 30 * MB, "protocol": "https",
+                               "url": "https://rr1.googlevideo.com/a258"})
+    assert next(o for o in F.build_options(info) if o.label == "720p").spec == "136+140"
 
 
 def test_audio_prefers_plain_over_drc():

@@ -360,6 +360,7 @@ def make_app(cfg: Config | None = None, tg: Telegram | None = None) -> web.Appli
     app.router.add_get("/health", health)
     app.router.add_post("/webhook", webhook)
     app.router.add_get("/dl/{token}", app[STREAMER].handle)
+    app.router.add_get("/_src/{sid}", app[STREAMER].relay)   # local only: ranged googlevideo relay for ffmpeg
     app.router.add_get("/bench", bench)
     app.router.add_get("/netbench", netbench)
     app.router.add_get("/logs", logs)

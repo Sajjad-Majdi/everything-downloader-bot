@@ -385,7 +385,7 @@ class Bot:
         ticker = asyncio.create_task(self.tick(chat, mid, progress)) if mid is not None else None
         try:
             if mode == "url_send":
-                thumb = await self._thumb(thumb_task, tm)
+                thumb = await self._thumb(thumb_task, tm, wait=2)   # Telegram is fast here; do not wait long
                 await status(T.UPLOADING)
                 t1 = time.monotonic()
                 try:
@@ -429,14 +429,16 @@ class Bot:
                 thumb_task.cancel()
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    async def _thumb(self, task, tm):
+    async def _thumb(self, task, tm, wait: float = 6):
         if task is None:
             return None
+        t = time.monotonic()
         try:
-            thumb = await asyncio.wait_for(asyncio.shield(task), 6)
+            thumb = await asyncio.wait_for(asyncio.shield(task), wait)
         except Exception:
             thumb = None
         tm["thumb"] = bool(thumb)
+        tm["thumb_wait"] = round(time.monotonic() - t, 2)
         return thumb
 
     def _done(self, tm: dict, t0: float, key, res: dict) -> dict:

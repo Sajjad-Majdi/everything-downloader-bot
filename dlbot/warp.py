@@ -67,8 +67,10 @@ def _setup_blocking() -> None:
     with open(profile, encoding="utf-8") as fh, open(conf, "w", encoding="utf-8") as out:
         out.write(write_config(fh.read()))
     logf = open(os.path.join(DIR, "wireproxy.log"), "ab")
+    # Go grew wireproxy to ~65 MB during a 28 MB download; a soft limit keeps it small (512 MB container)
+    env = dict(os.environ, GOMEMLIMIT=os.environ.get("WARP_GOMEMLIMIT", "40MiB"), GOGC="50")
     _proc = subprocess.Popen(["wireproxy", "-c", conf], stdout=logf, stderr=subprocess.STDOUT,
-                             stdin=subprocess.DEVNULL)
+                             stdin=subprocess.DEVNULL, env=env)
 
 
 def _trace() -> str:

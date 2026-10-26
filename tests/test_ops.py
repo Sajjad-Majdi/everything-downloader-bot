@@ -124,3 +124,51 @@ async def test_fill_sizes_heads_open_cdn_formats(aiohttp_client, monkeypatch):
         await tg.s.close()
     assert [f["filesize"] for f in info["formats"]] == [10, 1000]
     assert formats.build_options(info)[0].spec == "big"
+
+
+async def test_ranged_relay_fetches_googlevideo_in_chunks(aiohttp_client, monkeypatch):
+    from aiohttp import web
+
+    from dlbot import stream
+    from dlbot.server import STREAMER
+
+    payload = bytes(range(256)) * 100          # 25600 bytes
+    seen = []
+
+    async def origin(request):
+        rng = request.headers.get("Range")
+        seen.append(rng)
+        a, b = rng.split("=")[1].split("-")
+        a, b = int(a), min(int(b), len(payload) - 1)
+        return web.Response(status=206, body=payload[a:b + 1], headers={
+            "Content-Range": f"bytes {a}-{b}/{len(payload)}", "Content-Type": "video/mp4"})
+
+    src = web.Application()
+    src.router.add_get("/videoplayback", origin)
+    oc = await aiohttp_client(src)
+    monkeypatch.setattr(stream, "RANGE_CHUNK", 10000)
+    app = make_app(cfg(), FakeTG())
+    client = await aiohttp_client(app)
+    st = app[STREAMER]
+    st.local_base = str(client.make_url("")).rstrip("/")
+    local = st.register({"url": str(oc.make_url("/videoplayback")), "http_headers": {"X-T": "1"}}, None)
+    path = local[len(st.local_base):]
+    r = await client.get(path)
+    assert r.status == 200 and await r.read() == payload
+    assert seen == ["bytes=0-9999", "bytes=10000-19999", "bytes=20000-25599"]
+    seen.clear()
+    r = await client.get(path, headers={"Range": "bytes=12000-"})
+    assert r.status == 206 and r.headers["Content-Range"] == "bytes 12000-25599/25600"
+    assert await r.read() == payload[12000:] and seen == ["bytes=12000-21999", "bytes=22000-25599"]
+    r = await client.get(path, headers={"Range": "bytes=5-9"})
+    assert r.status == 206 and await r.read() == payload[5:10]
+    assert (await client.get("/_src/unknown")).status == 404
+
+
+def test_ffmpeg_uses_local_relay_for_googlevideo():
+    from dlbot.stream import chunked_host, ffmpeg_cmd
+    assert chunked_host("https://rr3---sn-x.googlevideo.com/videoplayback?a=1")
+    assert not chunked_host("https://scontent.cdninstagram.com/v.mp4")
+    cmd = ffmpeg_cmd([{"url": "https://rr1.googlevideo.com/v"}, {"url": "https://rr1.googlevideo.com/a"}],
+                     "http://127.0.0.1:40001", ["http://127.0.0.1:10000/_src/a", "http://127.0.0.1:10000/_src/b"])
+    assert "-http_proxy" not in cmd and cmd.count("-i") == 2 and "http://127.0.0.1:10000/_src/b" in cmd

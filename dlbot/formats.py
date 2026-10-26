@@ -94,8 +94,9 @@ def _best_audio(fmts: list[dict]) -> dict | None:
     auds = [f for f in fmts if is_audio_only(f)]
     if not auds:
         return None
+    # stereo first: YouTube's 5.1 track (258, 384 kbps) only makes phone videos bigger
     return max(auds, key=lambda f: (f.get("ext") == "m4a", not is_drc(f), proto_score(f),
-                                    f.get("abr") or f.get("tbr") or 0))
+                                    (f.get("audio_channels") or 2) <= 2, f.get("abr") or f.get("tbr") or 0))
 
 
 def is_drc(f: dict) -> bool:
@@ -153,13 +154,14 @@ def direct_url(opt: Option) -> str | None:
     return v["url"] if is_direct_host(v["url"]) else None
 
 
-def sizeless_direct(info: dict, limit: int = 8) -> list[dict]:
+def sizeless_direct(info: dict, limit: int = 6) -> list[dict]:
     """Video formats on open CDNs (Instagram, X) with no size: a HEAD request can tell it."""
     out = []
     for item in (entries_of(info) or [info]):
         for f in _formats(item):
+            # only files that already carry audio can be sent by URL; DASH video-only parts are skipped
             if (not f.get("filesize") and not f.get("filesize_approx") and f.get("url") and is_video(f)
-                    and proto_score(f) and is_direct_host(f["url"])):
+                    and has_audio(f) and proto_score(f) and is_direct_host(f["url"])):
                 out.append(f)
     return out[:limit]
 
