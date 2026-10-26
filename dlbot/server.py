@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import hmac
 import logging
 import os
 import time
+from urllib.parse import urlparse
 
 from aiohttp import web
 
@@ -23,13 +25,45 @@ CFG = web.AppKey("cfg", Config)
 BOT = web.AppKey("bot", Bot)
 STREAMER = web.AppKey("streamer", Streamer)
 TG = web.AppKey("tg", Telegram)
+STATE = web.AppKey("state", dict)
+STARTED = time.monotonic()
+# Another copy of this bot (the old Singapore service) re-registers the webhook to itself
+# whenever it wakes up, which silently moved every update to the slow instance (2026-10-26).
+# The live instance checks the webhook every WEBHOOK_CHECK_EVERY seconds and takes it back.
+WEBHOOK_CHECK_EVERY = float(os.environ.get("WEBHOOK_CHECK_EVERY", "60"))
+LOG_RING: collections.deque[str] = collections.deque(maxlen=1500)
+
+
+class RingHandler(logging.Handler):
+    """Keeps the last log lines in RAM for /logs (Render's log view needs the dashboard)."""
+
+    def emit(self, record):
+        try:
+            LOG_RING.append(self.format(record))
+        except Exception:
+            pass
 
 
 async def health(request: web.Request) -> web.Response:
     bot = request.app[BOT]
     return web.json_response({"ok": True, "commit": os.environ.get("RENDER_GIT_COMMIT", "")[:7],
-                              "token": bool(request.app[CFG].bot_token),
-                              "tasks": len(bot.tasks), "streams": request.app[STREAMER].active})
+                              "token": bool(request.app[CFG].bot_token), "up": int(time.monotonic() - STARTED),
+                              "tasks": len(bot.tasks), "streams": request.app[STREAMER].active,
+                              "webhook_ok": request.app[STATE].get("webhook_ok")})
+
+
+async def logs(request: web.Request) -> web.Response:
+    """Owner-only: /logs?k=BENCH_KEY&n=200&grep=word. The bot token is masked."""
+    cfg = request.app[CFG]
+    if not cfg.bench_key or not hmac.compare_digest(request.query.get("k", ""), cfg.bench_key):
+        return web.Response(status=403)
+    n = min(int(request.query.get("n", "200")), LOG_RING.maxlen)
+    grep = request.query.get("grep", "").lower()
+    lines = [x for x in LOG_RING if not grep or grep in x.lower()][-n:]
+    text = "\n".join(lines)
+    if cfg.bot_token:
+        text = text.replace(cfg.bot_token, "<token>")
+    return web.Response(text=text + "\n")
 
 
 async def webhook(request: web.Request) -> web.Response:
@@ -65,19 +99,26 @@ async def bench(request: web.Request) -> web.Response:
     if request.query.get("dbg") == "1":
         dbg = ytdl.DebugLog()
         extra |= {"logger": dbg, "verbose": True, "quiet": False}
+    cookies = None if request.query.get("nocookies") == "1" else cfg.cookie_file
     t0 = time.monotonic()
     try:
         async with bot.extracts:
             fast = request.query.get("fast", "1") == "1" and not request.query.get("pc")
-            info = await asyncio.to_thread(ytdl.extract, url, cfg.cookie_file, extra, fast)
+            info = await asyncio.to_thread(ytdl.extract, url, cookies, extra, fast)
     except Exception as e:
-        return web.json_response({"error": f"extract: {e}"[:300], "log": dbg.lines[-60:] if dbg else None},
+        return web.json_response({"error": f"extract: {e}"[:300], "log": dbg.lines[-80:] if dbg else None},
                                  status=502)
     extract_s = round(time.monotonic() - t0, 2)
     if request.query.get("only") == "extract":
-        return web.json_response({"extract": extract_s, "formats": len(info.get("formats") or []),
-                                  "client": info.get("_fast_client") or "default",
-                                  "log": dbg.lines[-120:] if dbg else None})
+        out = {"extract": extract_s, "formats": len(info.get("formats") or []),
+               "client": info.get("_fast_client") or "default", "log": dbg.lines[-120:] if dbg else None}
+        if request.query.get("fmts") == "1":
+            out["list"] = [{k: f.get(k) for k in ("format_id", "ext", "vcodec", "acodec", "width", "height", "tbr",
+                                                   "filesize", "filesize_approx", "protocol")}
+                           | {"host": urlparse(f.get("url") or "").hostname}
+                           for f in (info.get("formats") or [])]
+            out["options"] = [(o.label, o.spec, o.size) for o in build_options(info)]
+        return web.json_response(out)
     index = None
     entries = entries_of(info)
     if entries:
@@ -178,6 +219,11 @@ async def warm_up(app: web.Application):
         log.warning("warm-up failed after %.1fs: %s", time.monotonic() - t0, e)
 
 
+async def register_webhook(cfg: Config, tg: Telegram):
+    await tg.call("setWebhook", url=f"{cfg.public_url}/webhook", secret_token=cfg.webhook_secret,
+                  allowed_updates=["message", "callback_query"], max_connections=8)
+
+
 async def set_webhook(app: web.Application):
     cfg, tg = app[CFG], app[TG]
     if not cfg.bot_token:
@@ -188,15 +234,44 @@ async def set_webhook(app: web.Application):
         return
     for attempt in range(5):
         try:
-            await tg.call("setWebhook", url=f"{cfg.public_url}/webhook", secret_token=cfg.webhook_secret,
-                          allowed_updates=["message", "callback_query"], max_connections=4)
+            await register_webhook(cfg, tg)
             await tg.call("setMyCommands", commands=[{"command": "start", "description": "راهنما"}])
             log.info("webhook set to %s/webhook", cfg.public_url)
+            app[STATE]["webhook_ok"] = True
             break
         except Exception as e:
             log.warning("setWebhook attempt %d failed: %s", attempt + 1, e)
             await asyncio.sleep(5 * (attempt + 1))
     await ensure_photo(tg)
+
+
+async def check_webhook(app: web.Application) -> bool:
+    """One check: True when the webhook already points here; re-registers it otherwise."""
+    cfg, tg = app[CFG], app[TG]
+    want = f"{cfg.public_url}/webhook"
+    info = await tg.call("getWebhookInfo")
+    if info.get("last_error_message"):
+        app[STATE]["webhook_error"] = info.get("last_error_message")
+    if info.get("url") == want:
+        app[STATE]["webhook_ok"] = True
+        return True
+    app[STATE]["webhook_ok"] = False
+    log.warning("webhook points to %r (pending %s); taking it back", info.get("url"), info.get("pending_update_count"))
+    await register_webhook(cfg, tg)
+    app[STATE]["webhook_ok"] = True
+    app[STATE]["webhook_taken_back"] = app[STATE].get("webhook_taken_back", 0) + 1
+    return False
+
+
+async def webhook_guard(app: web.Application):
+    while True:
+        await asyncio.sleep(WEBHOOK_CHECK_EVERY)
+        try:
+            await check_webhook(app)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("webhook check failed: %s", e)
 
 
 async def ensure_photo(tg: Telegram, icon: str = ICON):
@@ -225,19 +300,26 @@ def make_app(cfg: Config | None = None, tg: Telegram | None = None) -> web.Appli
     app[TG] = tg
     app[BOT] = Bot(cfg, tg)
     app[STREAMER] = Streamer(cfg)
+    app[STATE] = {}
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
     app.router.add_post("/webhook", webhook)
     app.router.add_get("/dl/{token}", app[STREAMER].handle)
     app.router.add_get("/bench", bench)
     app.router.add_get("/netbench", netbench)
+    app.router.add_get("/logs", logs)
+    background: list[asyncio.Task] = []
 
     async def on_startup(app):
         app[BOT].spawn(set_webhook(app))
+        if cfg.bot_token and cfg.public_url and os.environ.get("WEBHOOK_GUARD", "1") == "1":
+            background.append(asyncio.create_task(webhook_guard(app)))
         if cfg.bot_token and os.environ.get("WARMUP", "1") == "1":
             app[BOT].spawn(warm_up(app))
 
     async def on_cleanup(app):
+        for t in background:
+            t.cancel()
         await app[STREAMER].close()
         await app[TG].close()
 
@@ -247,7 +329,11 @@ def make_app(cfg: Config | None = None, tg: Telegram | None = None) -> web.Appli
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    logging.basicConfig(level=logging.INFO, format=fmt)
+    ring = RingHandler()
+    ring.setFormatter(logging.Formatter(fmt))
+    logging.getLogger().addHandler(ring)
     web.run_app(make_app(), host="0.0.0.0", port=int(os.environ.get("PORT", "10000")), access_log=None)
 
 

@@ -101,6 +101,9 @@ class Bot:
         return t
 
     async def handle_update(self, upd: dict):
+        date = (upd.get("message") or {}).get("date")
+        if date:   # how late Telegram delivered it (retries after webhook errors show up here)
+            log.info("update age=%.1fs", time.time() - date)
         try:
             if "callback_query" in upd:
                 await self.on_callback(upd["callback_query"])

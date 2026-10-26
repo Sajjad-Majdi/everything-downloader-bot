@@ -1,4 +1,4 @@
 # Update yt-dlp: bump the pin below (newest at https://pypi.org/project/yt-dlp/), push, Render rebuilds.
-yt-dlp[default]==2026.8.19
-deno==2.9.7
+yt-dlp[default]==2026.10.21
+deno==2.9.8
 aiohttp==3.14.5
