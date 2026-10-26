@@ -174,3 +174,26 @@ def test_ffmpeg_uses_local_relay_for_googlevideo():
     cmd = ffmpeg_cmd([{"url": "https://rr1.googlevideo.com/v"}, {"url": "https://rr1.googlevideo.com/a"}],
                      "http://127.0.0.1:40001", ["http://127.0.0.1:10000/_src/a", "http://127.0.0.1:10000/_src/b"])
     assert "-http_proxy" not in cmd and cmd.count("-i") == 2 and "http://127.0.0.1:10000/_src/b" in cmd
+
+
+async def test_warp_watchdog_restarts_dead_tunnel(monkeypatch):
+    import asyncio
+
+    from dlbot import warp
+    monkeypatch.setenv("YT_PROXY", "warp")
+    monkeypatch.setattr(warp, "available", lambda: True)
+    monkeypatch.setitem(warp.state, "ready", True)
+    monkeypatch.setitem(warp.state, "restarts", 0)
+    monkeypatch.setattr(warp, "alive", lambda: False)          # wireproxy died
+    starts = []
+
+    async def fake_start():
+        starts.append(1)
+        warp.state["ready"] = True
+        return True
+
+    monkeypatch.setattr(warp, "start", fake_start)
+    task = asyncio.create_task(warp.keep_alive(every=0.01, probe_every=999, retry_every=999))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    assert starts and warp.state["restarts"] >= 1 and warp.state["ready"] is True

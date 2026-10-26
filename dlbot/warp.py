@@ -25,7 +25,7 @@ PORT = int(os.environ.get("WARP_HTTP_PORT", "40001"))
 PROXY_URL = f"http://127.0.0.1:{PORT}"
 YT_HOST_RE = re.compile(r"^https?://([\w-]+\.)*(youtube\.com|youtu\.be|youtube-nocookie\.com|googlevideo\.com|ytimg\.com)(/|:|$)",
                         re.I)
-state: dict = {"ready": False, "error": None, "trace": None, "setup_s": None}
+state: dict = {"ready": False, "error": None, "trace": None, "setup_s": None, "restarts": 0}
 _proc: subprocess.Popen | None = None
 
 
@@ -121,3 +121,44 @@ def stop():
     if _proc is not None and _proc.poll() is None:
         _proc.terminate()
     _proc = None
+
+
+def alive() -> bool:
+    return _proc is not None and _proc.poll() is None
+
+
+async def keep_alive(every: float = 60, probe_every: float = 600, retry_every: float = 600):
+    """Watchdog: restart the tunnel when wireproxy died or stopped passing traffic; retry a failed
+    setup every `retry_every` s. After a failed restart the WARP device is registered anew."""
+    if not wanted() or not available():
+        return
+    last_try = last_probe = time.monotonic()
+    while True:
+        await asyncio.sleep(every)
+        now = time.monotonic()
+        broken = None
+        if state["ready"] and not alive():
+            broken = "wireproxy died"
+        elif state["ready"] and now - last_probe >= probe_every:
+            last_probe = now
+            try:
+                trace = await asyncio.to_thread(_trace)
+                if "warp=on" not in trace and "warp=plus" not in trace:
+                    broken = "trace without warp=on"
+            except Exception as e:
+                broken = f"probe failed: {str(e)[:120]}"
+        elif not state["ready"] and now - last_try >= retry_every:
+            broken = "not up"
+        if not broken:
+            continue
+        log.warning("WARP %s; restarting it", broken)
+        last_try = now
+        state["ready"] = False
+        state["restarts"] += 1
+        stop()
+        if not await start():
+            for name in ("wgcf-profile.conf", "wgcf-account.toml"):   # next try registers a new device
+                try:
+                    os.remove(os.path.join(DIR, name))
+                except OSError:
+                    pass

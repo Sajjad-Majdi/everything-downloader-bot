@@ -85,7 +85,8 @@ async def health(request: web.Request) -> web.Response:
                               "token": bool(request.app[CFG].bot_token), "up": int(time.monotonic() - STARTED),
                               "tasks": len(bot.tasks), "streams": request.app[STREAMER].active,
                               "webhook_ok": request.app[STATE].get("webhook_ok"),
-                              "warp": warp.state["ready"], "warp_error": warp.state["error"], "jsc": jsc.stats})
+                              "warp": warp.state["ready"], "warp_error": warp.state["error"],
+                              "warp_restarts": warp.state["restarts"], "jsc": jsc.stats})
 
 
 async def logs(request: web.Request) -> web.Response:
@@ -254,11 +255,20 @@ async def netbench(request: web.Request) -> web.Response:
 WARMUP_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"  # 19 s public clip
 
 
+WARMUP_EVERY = float(os.environ.get("WARMUP_EVERY", str(3 * 3600)))
+
+
 async def boot(app: web.Application):
-    """WARP tunnel for YouTube first (YouTube blocks Render's IP), then the warm-up extraction."""
+    """WARP tunnel for YouTube first (YouTube blocks Render's IP), then the warm-up extraction.
+    The warm-up repeats every WARMUP_EVERY s, so a new YouTube player version (its one-time ~15 s
+    preprocessing on 0.1 CPU) is met by the bot, not by Sajjad's next link."""
     await warp.start()
-    if app[CFG].bot_token and os.environ.get("WARMUP", "1") == "1":
+    app[STATE]["warp_task"] = asyncio.create_task(warp.keep_alive())   # keep a reference (no GC)
+    if not (app[CFG].bot_token and os.environ.get("WARMUP", "1") == "1"):
+        return
+    while True:
         await warm_up(app)
+        await asyncio.sleep(WARMUP_EVERY)
 
 
 async def warm_up(app: web.Application):
