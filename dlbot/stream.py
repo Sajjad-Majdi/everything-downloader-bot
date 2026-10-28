@@ -75,8 +75,9 @@ def ffmpeg_cmd(formats: list[dict], proxy: str | None = None, local: list[str | 
 
 
 class Streamer:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, store=None):
         self.cfg = cfg
+        self.store = store        # outbound meter + monthly guard (dlbot/store.py), optional
         self.active = 0
         self.resolved = LRU(maxsize=32, ttl=900)  # token -> info; ranged re-requests skip yt-dlp
         self.sources = LRU(maxsize=64, ttl=6 * 3600)  # relay id -> (url, headers, proxy) for ffmpeg
@@ -101,6 +102,9 @@ class Streamer:
             status = 410 if "expired" in str(e) else 403
             return web.Response(status=status, text="This link has expired or is invalid. Ask the bot for a new one.\n"
                                                     "لینک منقضی یا نامعتبر است. لینک تازه‌ای از ربات بگیرید.")
+        if self.store is not None and self.store.blocked(body.get("w") == self.cfg.owner_id):
+            return web.Response(status=503, text="Monthly limit reached.\n"
+                                                    "سقف حجم ماهانه‌ی ربات پر شده است.")
         if self.active >= self.cfg.max_streams:
             return web.Response(status=429, text="Busy, try again in a minute.\nسرور مشغول است. یک دقیقه بعد دوباره تلاش کنید.")
         self.active += 1
@@ -122,6 +126,12 @@ class Streamer:
             return web.Response(status=502, text=f"Source failed: {type(e).__name__}\nمنبع پاسخ نداد. دوباره تلاش کنید.")
         finally:
             self.active -= 1
+
+    async def write(self, request: web.Request, resp: web.StreamResponse, chunk: bytes):
+        """Write and count outbound bytes; our local ffmpeg relay (127.0.0.1) is not outbound."""
+        await resp.write(chunk)
+        if self.store is not None and request.remote not in LOCAL_HOSTS:
+            self.store.add_bytes(len(chunk))
 
     def register(self, f: dict, via: str | None) -> str:
         sid = secrets.token_urlsafe(12)
@@ -172,7 +182,7 @@ class Streamer:
                         await resp.prepare(request)
                         if request.method != "HEAD":
                             async for chunk in up.content.iter_chunked(CHUNK):
-                                await resp.write(chunk)
+                                await self.write(request, resp, chunk)
                         await resp.write_eof()
                         return resp
                     last = total - 1 if end is None else min(end, total - 1)
@@ -189,7 +199,7 @@ class Streamer:
                         return resp
                     end = last
                 async for chunk in up.content.iter_chunked(CHUNK):
-                    await resp.write(chunk)
+                    await self.write(request, resp, chunk)
             pos = stop + 1
             if end is not None and pos > end:
                 break
@@ -217,7 +227,7 @@ class Streamer:
             await resp.prepare(request)
             if method == "GET":
                 async for chunk in up.content.iter_chunked(CHUNK):
-                    await resp.write(chunk)
+                    await self.write(request, resp, chunk)
             await resp.write_eof()
             return resp
 
@@ -241,12 +251,12 @@ class Streamer:
                 log.warning("ffmpeg produced nothing: %s", err)
                 return web.Response(status=502, text="Remux failed.\nآماده‌سازی ویدیو ناموفق بود.")
             await resp.prepare(request)
-            await resp.write(first)
+            await self.write(request, resp, first)
             while True:
                 chunk = await proc.stdout.read(CHUNK)
                 if not chunk:
                     break
-                await resp.write(chunk)
+                await self.write(request, resp, chunk)
             await resp.write_eof()
             return resp
         finally:

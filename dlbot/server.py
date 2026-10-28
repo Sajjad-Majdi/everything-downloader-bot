@@ -16,6 +16,7 @@ from . import texts as T
 from .bot import Bot, Pending, auto_option, is_quick, quick_option
 from .formats import build_options, entries_of
 from .config import Config
+from .store import Store
 from .stream import Streamer
 from .tg import Telegram
 
@@ -87,7 +88,8 @@ async def health(request: web.Request) -> web.Response:
                               "tasks": len(bot.tasks), "streams": request.app[STREAMER].active,
                               "webhook_ok": request.app[STATE].get("webhook_ok"),
                               "warp": warp.state["ready"], "warp_error": warp.state["error"],
-                              "warp_restarts": warp.state["restarts"], "jsc": jsc.stats})
+                              "warp_restarts": warp.state["restarts"], "jsc": jsc.stats,
+                              **(bot.store.report() if bot.store else {"store": None})})
 
 
 async def logs(request: web.Request) -> web.Response:
@@ -224,6 +226,8 @@ async def netbench(request: web.Request) -> web.Response:
         chunk = os.urandom(1 << 20)
         while sent < size:
             sent += len(chunk)
+            if bot.store is not None:
+                bot.store.add_bytes(len(chunk))
             yield chunk
 
     import aiohttp
@@ -369,8 +373,11 @@ def make_app(cfg: Config | None = None, tg: Telegram | None = None) -> web.Appli
     app = web.Application(client_max_size=2 * 1024 * 1024)
     app[CFG] = cfg
     app[TG] = tg
-    app[BOT] = Bot(cfg, tg)
-    app[STREAMER] = Streamer(cfg)
+    store = None
+    if cfg.store_url and cfg.store_secret:
+        store = Store(cfg.store_url, cfg.store_secret, cfg.seats, cfg.out_soft_gb, cfg.out_hard_gb, cfg.store_cache)
+    app[BOT] = Bot(cfg, tg, store)
+    app[STREAMER] = Streamer(cfg, store)
     app[STATE] = {}
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
@@ -387,11 +394,15 @@ def make_app(cfg: Config | None = None, tg: Telegram | None = None) -> web.Appli
         if cfg.bot_token and cfg.public_url and os.environ.get("WEBHOOK_GUARD", "1") == "1":
             background.append(asyncio.create_task(webhook_guard(app)))
         background.append(asyncio.create_task(boot(app)))
+        if store is not None:
+            background.append(asyncio.create_task(store.run()))
 
     async def on_cleanup(app):
         for t in background:
             t.cancel()
         warp.stop()
+        if store is not None:
+            await store.close()
         await app[STREAMER].close()
         await app[TG].close()
 

@@ -7,3 +7,5 @@ __pycache__/
 cookies*.txt
 keepalive/.wrangler/
 keepalive/node_modules/
+store/.wrangler/
+store/node_modules/

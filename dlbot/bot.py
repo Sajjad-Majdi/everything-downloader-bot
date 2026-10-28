@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import os
 
 import aiohttp
 import logging
@@ -14,6 +15,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from . import texts as T
 from . import ytdl
+from . import store as S
 from .cache import LRU
 from .config import LINK_TTL, SAFE_UPLOAD_LIMIT, Config
 from .formats import (Option, bucket, build_options, direct_url, entries_of, entry_is_resolved, mp4_meta, plan,
@@ -117,9 +119,10 @@ def dl_timings(progress: dict) -> dict:
 
 
 class Bot:
-    def __init__(self, cfg: Config, tg: Telegram):
+    def __init__(self, cfg: Config, tg: Telegram, store: S.Store | None = None):
         self.cfg = cfg
         self.tg = tg
+        self.store = store      # public seats + monthly outbound guard; None = private (ALLOWED_USER_IDS only)
         self.pending = LRU(maxsize=64, ttl=6 * 3600)
         self.file_ids = LRU(maxsize=300)
         self.jobs = asyncio.Semaphore(cfg.max_jobs)
@@ -151,13 +154,36 @@ class Bot:
             log.exception("update failed")
 
     def allowed(self, user: dict | None) -> bool:
-        return bool(user) and user.get("id") in self.cfg.allowed_ids
+        uid = (user or {}).get("id")
+        if uid is None:
+            return False
+        return uid in self.cfg.allowed_ids or (self.store is not None and self.store.has_seat(uid))
+
+    async def refusal(self, user: dict | None) -> str | None:
+        """None when the user may use the bot; else the text to send. The owner and ALLOWED_USER_IDS
+        always pass; anyone else needs one of the `seats` public seats (first come, first served)."""
+        if self.allowed(user):
+            return None
+        uid = (user or {}).get("id")
+        if uid is None or self.store is None:
+            return T.NOT_ALLOWED
+        res = await self.store.seat(uid)
+        return None if res == S.OK else T.CAPACITY_FULL if res == S.FULL else T.TRY_LATER
+
+    def limited(self, uid: int | None, size: int | None = None) -> bool:
+        """Monthly outbound guard: over the soft line only the owner gets videos, over the hard line nobody."""
+        return self.store is not None and self.store.blocked(uid == self.cfg.owner_id, size)
+
+    def count_out(self, n: int):
+        if self.store is not None and n > 0:
+            self.store.add_bytes(n)
 
     # messages ----------------------------------------------------------------
     async def on_message(self, msg: dict):
         chat = msg["chat"]["id"]
-        if not self.allowed(msg.get("from")):
-            await self.tg.send(chat, T.NOT_ALLOWED)
+        refusal = await self.refusal(msg.get("from"))
+        if refusal:
+            await self.tg.send(chat, refusal)
             return
         text = (msg.get("text") or "").strip()
         if text.startswith("/start") or text.startswith("/help"):
@@ -166,6 +192,9 @@ class Bot:
         url = find_url(msg)
         if not url:
             await self.tg.send(chat, T.NO_LINK)
+            return
+        if self.limited(msg["from"]["id"]):
+            await self.tg.send(chat, T.MONTH_LIMIT)
             return
         status = await self.tg.send(chat, T.CHECKING, reply_to=msg["message_id"])
         await self.analyze(chat, status["message_id"], url)
@@ -330,6 +359,9 @@ class Bot:
 
     # delivery ------------------------------------------------------------------
     async def deliver(self, chat: int, mid: int, p: Pending, opt: Option):
+        if self.limited(chat, opt.size if plan(opt) in ("upload", "stream_link") else None):
+            await self.tg.edit(chat, mid, T.MONTH_LIMIT)
+            return
         try:
             res = await self.run_job(chat, mid, p, opt)
         except Exception as e:
@@ -413,8 +445,13 @@ class Bot:
                 if diag and diag.get("asdoc"):
                     extra = dict(extra, method="sendDocument")
                     meta = {}
-                res = await self.tg.send_video(chat, path, is_file=True, caption=caption, thumb=thumb,
-                                               progress=progress, **meta, **extra)
+                try:
+                    res = await self.tg.send_video(chat, path, is_file=True, caption=caption, thumb=thumb,
+                                                   progress=progress, **meta, **extra)
+                finally:   # outbound meter: every byte read into the request, retries included
+                    thumb_n = os.path.getsize(thumb) if thumb and os.path.exists(thumb) else 0
+                    self.count_out(progress.get("sent", progress.get("up", 0))
+                                   + thumb_n * (progress.get("attempts") or 1))
                 tm["upload"] = round(time.monotonic() - t1, 2)
                 if progress.get("t_up_done"):   # body acked by Telegram; the rest is its processing
                     tm["upload_body"] = round(progress["t_up_done"] - t1, 2)
@@ -484,7 +521,8 @@ class Bot:
             if not self.cfg.public_url:
                 await self.tg.edit(chat, mid, "آدرس عمومی سرور (PUBLIC_URL) تنظیم نشده است.")
                 return
-            token = sign(self.cfg.link_key, {"u": p.url, "f": opt.spec, "i": p.index, "t": p.title[:60]}, LINK_TTL)
+            token = sign(self.cfg.link_key, {"u": p.url, "f": opt.spec, "i": p.index, "t": p.title[:60], "w": chat},
+                         LINK_TTL)
             url = f"{self.cfg.public_url}/dl/{token}"
             text = T.too_big_stream(size_txt) + "\n" + url
         await self.tg.edit(chat, mid, f"{p.title[:200]}\n{text}", keyboard([[(T.BUTTON_DL, "url:" + url)]]))

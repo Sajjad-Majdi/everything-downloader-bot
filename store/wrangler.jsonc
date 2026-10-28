@@ -1,0 +1,9 @@
+{
+  "name": "downloader-store",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "d1_databases": [
+    { "binding": "DB", "database_name": "downloader-store", "database_id": "9c350f3f-dd29-49fb-b454-2fd9400553ef" }
+  ]
+}

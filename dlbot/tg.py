@@ -150,6 +150,7 @@ class Telegram:
                     h.close()
             return self._result(method, body)
         last_exc: Exception | None = None
+        progress["sent"] = 0   # file bytes read into the request over all attempts (outbound meter)
         for attempt in range(1, self.ATTEMPTS + 1):
             for k in ("t_up_done", "t_read_done"):
                 progress.pop(k, None)
@@ -176,6 +177,7 @@ class Telegram:
                             progress.get("up"), progress.get("up_total"), attempt)
                 last_exc = TgError(method, "upload stalled")
             finally:
+                progress["sent"] += progress.get("up", 0)
                 for h in handles:
                     h.close()
                 await session.close()
