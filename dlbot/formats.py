@@ -71,11 +71,29 @@ def proto_score(f: dict) -> int:
     return 1 if (f.get("protocol") or "https") in ("http", "https") else 0
 
 
-def fmt_size(f: dict | None, duration: float | None) -> tuple[int | None, bool]:
+def hls_twin_tbr(f: dict, fmts: list[dict]) -> float | None:
+    """X lists each progressive mp4 with the encoder's bitrate ceiling (832 kbps for a 360p file that
+    really averages ~280), so tbr and the filesize_approx built from it run 2-3x too high. The HLS
+    variant of the same picture size carries the real average bitrate (measured 2026-11-07: shown
+    8.3 MB, real file 2.9 MB; the HLS tbr gives 2.9). Only open-CDN progressive files without a real size."""
+    if f.get("filesize") or (f.get("protocol") or "https") not in ("http", "https") or not is_direct_host(f.get("url")):
+        return None
+    w, h = f.get("width"), f.get("height")
+    if not (w and h and f.get("tbr")):
+        return None
+    twins = [t["tbr"] for t in fmts if t is not f and t.get("protocol") in ("m3u8", "m3u8_native") and t.get("tbr")
+             and t.get("width") == w and t.get("height") == h and t["tbr"] < f["tbr"]]
+    return min(twins) if twins else None
+
+
+def fmt_size(f: dict | None, duration: float | None, fmts: list[dict] | None = None) -> tuple[int | None, bool]:
     if f is None:
         return 0, False
     if f.get("filesize"):
         return int(f["filesize"]), False
+    twin = hls_twin_tbr(f, fmts) if fmts and duration else None
+    if twin:
+        return int(twin * duration * 125), True
     if f.get("filesize_approx"):
         return int(f["filesize_approx"]), True
     if f.get("tbr") and duration:
@@ -104,9 +122,9 @@ def is_drc(f: dict) -> bool:
     return "drc" in str(f.get("format_id", "")).lower() or "drc" in str(f.get("format_note", "")).lower()
 
 
-def _make(label: str, v: dict, audio: dict | None, duration, best=False) -> Option:
+def _make(label: str, v: dict, audio: dict | None, duration, fmts: list[dict], best=False) -> Option:
     a = None if has_audio(v) else audio
-    vs, va = fmt_size(v, duration)
+    vs, va = fmt_size(v, duration, fmts)
     as_, aa = fmt_size(a, duration)
     size = None if vs is None or as_ is None else vs + as_
     spec = f"{v['format_id']}+{a['format_id']}" if a else str(v.get("format_id") or "b")
@@ -129,10 +147,10 @@ def build_options(info: dict) -> list[Option]:
         # then a file that already has audio (no merge), then bitrate/size
         pick = max(groups[b], key=lambda f: (codec_score(f), proto_score(f), has_audio(f), f.get("tbr") or 0,
                                              f.get("filesize") or 0))
-        options.append(_make(f"{b}p" if b else "ویدیو", pick, audio, duration))
+        options.append(_make(f"{b}p" if b else "ویدیو", pick, audio, duration, fmts))
     options = options[-MAX_OPTIONS:]
     top = max(vids, key=lambda f: (p_of(f), f.get("tbr") or 0, proto_score(f)))
-    best = _make("بهترین", top, audio, duration, best=True)
+    best = _make("بهترین", top, audio, duration, fmts, best=True)
     if best.spec != options[-1].spec and best.height >= options[-1].height:
         best.label = f"بهترین {bucket(best.height)}p"
         options.append(best)

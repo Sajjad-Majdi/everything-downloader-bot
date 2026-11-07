@@ -45,6 +45,38 @@ def test_size_estimate_from_tbr_when_no_filesize():
     assert F.fmt_size({}, None) == (None, True)
 
 
+def x_info(duration=83):
+    """X post as yt-dlp lists it (2026-11-07): progressive http-* carry the encoder's bitrate ceiling as tbr
+    (and filesize_approx built from it); the HLS variants of the same picture carry the real average."""
+    def f(fid, w, h, tbr, proto, **kw):
+        d = {"format_id": fid, "ext": "mp4", "width": w, "height": h, "tbr": tbr, "protocol": proto,
+             "url": "https://video.twimg.com/ext_tw_video/1/" + fid, "acodec": None if proto == "https" else "none",
+             "vcodec": None if proto == "https" else "avc1.4D401E"}
+        if proto == "https":
+            d["filesize_approx"] = int(tbr * duration * 125)
+        return d | kw
+    return {"duration": duration, "formats": [
+        {"format_id": "hls-audio-128000-Audio", "ext": "mp4", "vcodec": "none", "acodec": None, "tbr": 128,
+         "protocol": "m3u8_native", "url": "https://video.twimg.com/a"},
+        f("http-832", 640, 360, 832, "https"), f("hls-283", 640, 360, 283.923, "m3u8_native"),
+        f("http-2176", 1280, 720, 2176, "https"), f("hls-793", 1280, 720, 793.099, "m3u8_native"),
+        f("http-10368", 1920, 1080, 10368, "https")]}
+
+
+def test_x_size_uses_hls_average_not_the_progressive_bitrate_ceiling():
+    opts = {o.label: o for o in F.build_options(x_info())}
+    # real files sent by the bot: 360p 3068153 B, 720p 8404259 B (menu used to show 8.3 and 22 MB)
+    assert opts["360p"].spec == "http-832" and opts["360p"].approx
+    assert abs(opts["360p"].size - 3068153) / 3068153 < 0.1
+    assert abs(opts["720p"].size - 8404259) / 8404259 < 0.1
+    assert opts["1080p"].size == int(10368 * 83 * 125)      # no HLS twin: old estimate stays
+    # a real filesize always wins, and the HLS twin never raises an estimate
+    f = x_info()["formats"][1] | {"filesize": 5 * MB}
+    assert F.fmt_size(f, 83, x_info()["formats"]) == (5 * MB, False)
+    low = x_info()["formats"][1] | {"tbr": 100, "filesize_approx": 1_000_000}
+    assert F.fmt_size(low, 83, x_info()["formats"]) == (1_000_000, True)
+
+
 def test_vertical_video_label_uses_short_side():
     opts = F.build_options(insta_info())
     assert opts[0].label == "720p"
