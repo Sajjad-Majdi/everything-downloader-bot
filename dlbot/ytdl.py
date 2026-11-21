@@ -9,6 +9,7 @@ import tempfile
 import time
 
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
 from . import jsc, warp
 from .config import TG_UPLOAD_LIMIT
@@ -100,6 +101,9 @@ class DebugLog:
 
 
 YT_RE = re.compile(r"^https?://([\w-]+\.)?(youtube\.com|youtu\.be|youtube-nocookie\.com)/", re.I)
+X_INDEXED_RE = re.compile(
+    r"^https?://(?:(?:www|m(?:obile)?)\.)?(?:x|twitter)\.com/(?P<status>(?:i/web|[\w-]+)/status/[0-9]+)"
+    r"/(?:video|photo)/(?P<index>[0-9]+)/?(?:[?#].*)?$", re.I)
 # A YouTube client that needs no JS player (no deno run) and no cookies; tried first.
 # Off by default: on Render's IP visionos answers LOGIN_REQUIRED without cookies (measured
 # 2026-10-20), so the try only cost ~1.7 s. Set YT_FAST_CLIENT=visionos on a host where it works.
@@ -111,6 +115,17 @@ YT_CLIENTS = os.environ.get("YT_CLIENTS", "tv_samsung").strip()
 
 def _usable(info: dict) -> bool:
     return any(f.get("url") and f.get("vcodec") != "none" for f in info.get("formats") or [])
+
+
+def _with_x_status_fallback(run, url: str, **kwargs):
+    try:
+        return run(url, **kwargs)
+    except DownloadError as e:
+        match = X_INDEXED_RE.match(url)
+        if not match or f"Media #{match['index']} is not a video" not in str(e):
+            raise
+        # yt-dlp rejects indexed GIFs, but includes them when extracting the whole post.
+        return run(f"https://x.com/{match['status']}", **kwargs)
 
 
 def extract(url: str, cookie_file: str | None = None, extra: dict | None = None, fast: bool = True) -> dict:
@@ -143,7 +158,7 @@ def extract(url: str, cookie_file: str | None = None, extra: dict | None = None,
         except Exception as e:
             log.info("clients %s failed (%s); default clients", YT_CLIENTS, str(e)[:120])
     with YoutubeDL(base_opts(cookie_file, url) | extra) as ydl:
-        info = ydl.extract_info(url, download=False)
+        info = _with_x_status_fallback(ydl.extract_info, url, download=False)
         return ydl.sanitize_info(info)
 
 
@@ -153,7 +168,8 @@ def resolve(url: str, spec: str, index: int | None = None, cookie_file: str | No
     if index:
         opts |= {"noplaylist": False, "playlist_items": str(index), "extract_flat": False}
     with YoutubeDL(opts) as ydl:
-        info = ydl.sanitize_info(ydl.extract_info(url, download=False))
+        info = _with_x_status_fallback(ydl.extract_info, url, download=False)
+        info = ydl.sanitize_info(info)
     if info.get("_type") in ("playlist", "multi_video"):
         entries = [e for e in info.get("entries") or [] if e]
         if not entries:
@@ -212,7 +228,7 @@ def download(url: str, spec: str, tmpdir: str, progress: dict, index: int | None
             if info is not None:
                 ydl.process_ie_result(ydl.sanitize_info(copy.deepcopy(info), True), download=True)
             else:
-                ydl.download([url])
+                _with_x_status_fallback(lambda u: ydl.download([u]), url)
     except Exception:
         if progress.get("too_big"):
             raise TooBig()

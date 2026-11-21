@@ -2,6 +2,7 @@ import time
 
 import pytest
 from conftest import MB, insta_info, mp4_header, yt_info
+from yt_dlp.utils import DownloadError
 
 from dlbot import formats as F
 from dlbot import signing, texts
@@ -274,6 +275,72 @@ def test_youtube_single_client_with_cookies_then_default(monkeypatch):
     ytdl.extract("https://youtu.be/abc", None)             # no cookies: defaults only
     ytdl.extract("https://www.instagram.com/reel/x/", "/tmp/c.txt")
     assert [c[0] for c in _FakeYDL.calls] == [None, None]
+
+
+@pytest.fixture
+def x_extract(monkeypatch):
+    from dlbot import ytdl
+    calls, results = [], {}
+
+    def extract_info(self, url, download=False):
+        calls.append((url, download))
+        result = results[url]
+        if isinstance(result, DownloadError):
+            raise result
+        return result
+
+    monkeypatch.setattr(_FakeYDL, "extract_info", extract_info)
+    monkeypatch.setattr(ytdl, "YoutubeDL", _FakeYDL)
+    return calls, results
+
+
+@pytest.mark.parametrize("url", ["https://x.com/a/status/123/video/1",
+                                 "https://m.twitter.com/a/status/123/photo/1?s=20"])
+def test_x_indexed_gif_retries_bare_status(x_extract, url):
+    from dlbot import ytdl
+    calls, results = x_extract
+    status = "https://x.com/a/status/123"
+    results[url] = DownloadError("ERROR: [twitter] 123: Media #1 is not a video")
+    results[status] = {"id": "gif", "formats": [
+        {"format_id": "http-0", "url": "https://video.twimg.com/tweet_video/gif.mp4", "acodec": "none"}]}
+    info = ytdl.extract(url)
+    assert info == results[status] and F.build_options(info)
+    assert calls == [(url, False), (status, False)]
+
+
+def test_x_indexed_video_does_not_retry(x_extract):
+    from dlbot import ytdl
+    calls, results = x_extract
+    url = "https://x.com/a/status/123/video/2"
+    results[url] = x_info()
+    assert ytdl.extract(url) == results[url]
+    assert calls == [(url, False)]
+
+
+def test_x_photo_only_post_still_fails(x_extract):
+    from dlbot import ytdl
+    calls, results = x_extract
+    status = "https://x.com/a/status/123"
+    url = status + "/photo/1"
+    results[url] = DownloadError("ERROR: [twitter] 123: Media #1 is not a video")
+    results[status] = DownloadError("ERROR: [twitter] 123: No video could be found in this tweet")
+    with pytest.raises(DownloadError, match="No video could be found in this tweet"):
+        ytdl.extract(url)
+    assert calls == [(url, False), (status, False)]
+
+
+@pytest.mark.parametrize(("url", "error"), [
+    ("https://x.com/a/status/123/video/1", "Video #1 is unavailable"),
+    ("https://example.com/a/status/123/video/1", "Media #1 is not a video"),
+])
+def test_unrelated_extraction_failure_does_not_retry(x_extract, url, error):
+    from dlbot import ytdl
+    calls, results = x_extract
+    results[url] = DownloadError(error)
+    with pytest.raises(DownloadError) as exc:
+        ytdl.extract(url)
+    assert exc.value is results[url]
+    assert calls == [(url, False)]
 
 
 def test_youtube_https_dash_beats_muxed_hls():
